@@ -1,0 +1,14 @@
+{
+  "release": "2026-10-04-r17",
+  "board": "Guition JC3636K718/C ESP32-S3 16 MB",
+  "build_host": "Apple Silicon macOS",
+  "arduino_cli": "1.5.1",
+  "esp32_core": "3.3.11",
+  "nimble": "2.5.1",
+  "sketch_bytes": 2371342,
+  "firmware_sha256": "52060b37b73753ed33d34bd99a6483c2c134980837a57fb10259e7f51af26d01",
+  "host_tests": "9067 checks passed",
+  "native_ui_tests": "passed",
+  "voice_motor_hardware_test": "not performed by agent",
+  "github_ci": "not yet run"
+}

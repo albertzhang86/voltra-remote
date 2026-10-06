@@ -1,0 +1,17 @@
+build/
+.build/
+*.bin
+*.elf
+*.map
+node_modules/
+.DS_Store
+WORKLOG.md
+
+.tools/
+.arduino/
+backups/
+
+firmware/VoltraKnob/src/voice/private_replay_fixture.h
+
+releases/
+.installer-env/

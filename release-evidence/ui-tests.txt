@@ -1,0 +1,2 @@
+Tap-number load, loaded weight edits, mode menu, session, availability and idle navigation tests passed.
+Rendered actual firmware screens in build/preview-*.ppm

@@ -1,0 +1,78 @@
+VOLTRA REMOTE
+Shareable release: 2026-10-04-r17
+
+HARDWARE
+Guition JC3636K718 / JC3636K718C ESP32-S3 knob: round 360x360 display,
+16 MB flash, with the board wiring described in source/README.md.
+Do not install this image on an Elecrow knob or another ESP32 board.
+
+INSTALL (no compilation needed)
+1. Extract the entire ZIP into a writable folder on your computer.
+2. Install Python 3.10 or newer from https://www.python.org/downloads/.
+   Internet access is needed the first time for the esptool dependency.
+3. Connect the knob with a USB DATA cable. On factory firmware, disable HID
+   and Udisk if enabled, exit Settings to save, then restart the knob.
+4. Windows: double-click Install-Windows.bat.
+   macOS: double-click Install.command. If macOS blocks it, open Terminal,
+   type `python3 `, drag install.py into Terminal, and press Enter.
+   Linux: run `python3 install.py` in the extracted folder.
+5. Select the knob's serial port and type INSTALL. The installer saves a
+   full original backup, then clears saved settings and installs firmware.
+   Keep the USB cable connected until installation finishes.
+6. Keep the backups folder somewhere safe. Restart the knob if needed.
+
+If the USB port is absent, try another data cable. If accessible, hold BOOT,
+press/release RESET, then release BOOT to enter download mode. Serial port
+names can change afterward. Close other serial monitors before installing.
+Linux users need serial-device access (commonly the dialout group).
+
+USE
+Voice is active: say "Load weight" to load, or "Release weight" to unload.
+No wake phrase is required. Voice can miss or falsely detect speech; keep the
+trainer's physical unloading control reachable. No bottom voice text is shown.
+
+Select a trainer, then a mode. Supported modes: Weight Training, Resistance Band,
+Damper and Isokinetic. Cardio, Custom Curves and Isometric Test are excluded;
+unsupported unloaded states open mode selection.
+Swipe LEFT for the circular mode selector. Turn to highlight and tap the center,
+or tap an outer icon. Mode changes are blocked while loaded/armed.
+Turn the dial to edit the highlighted setting; wait for trainer confirmation.
+Tap the main weight/maximum/factor/speed value to load or unload.
+In Weight Training, select the Weight tile to use tap-to-load.
+Tap the trainer name to return to device selection while unloaded.
+Swipe RIGHT from controls for cable-length adjustment. Pull and hold the cable
+for the trainer to save. This does not command motorized cable retraction.
+The physical ring and main value dim while unloaded and brighten while loaded.
+The screen uses faster partial redraws, with touch/display prioritized over speech.
+
+CURRENT LIMITATIONS
+Weight Training/modifiers display kg; Band and Isokinetic weight fields follow
+the trainer's kg/lb setting. Cable length follows cm/in.
+Eccentric is added weight, not percentage. See source/README.md for ranges.
+Set up Twin Mode before connecting the knob and select the actual controller.
+Control/Paired labels reflect the selected session, not verified physical roles.
+If roles change, unload and use Switch controller. Connecting to a follower may
+read values without allowing control. No fixed device identities are included.
+Inter approximates the manufacturer's font; reconstructed symbols are not
+manufacturer-supplied vector files. Polar Bear Strength startup logo included.
+No 250 lb/accessory-limit discovery or motorized cable-retract control.
+Some settings screens cannot be distinguished from their training state.
+Disconnecting or powering off the knob does NOT unload the trainer.
+Compare settings against the trainer during your first low-resistance trial.
+The knob needs USB power; no computer or phone bridge is required after setup.
+
+RESTORE YOUR ORIGINAL FIRMWARE
+Use YOUR OWN backups/original-*.bin from this installer. From this folder:
+ Windows: .installer-env\Scripts\python.exe -m esptool --chip esp32s3 --port COMx --baud 115200 write-flash 0 backups\YOUR-BACKUP.bin
+ macOS/Linux: .installer-env/bin/python -m esptool --chip esp32s3 --port /dev/YOUR_PORT --baud 115200 write-flash 0 backups/YOUR-BACKUP.bin
+Replace the port and backup filename. Enter download mode if required.
+
+SOURCE / VALIDATION
+Editable source, assets, licenses and build/test scripts are in source/.
+The source setup script targets Apple Silicon macOS; prebuilt installation uses
+Python and is designed for Windows, macOS and Linux. The installer has package
+and command-path checks; Windows/Linux installation has not been hardware-tested.
+Firmware was rebuilt from the supplied source; the device-control tests pass.
+Use `python3 install.py --verify-only` to check files without touching a device.
+Official flashing documentation:
+https://docs.espressif.com/projects/esptool/en/latest/esp32s3/esptool/basic-commands.html
