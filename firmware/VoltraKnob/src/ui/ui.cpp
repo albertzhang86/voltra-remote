@@ -284,8 +284,27 @@ void begin(){
  lv_anim_t reveal;lv_anim_init(&reveal);lv_anim_set_var(&reveal,splash);lv_anim_set_values(&reveal,255,0);lv_anim_set_delay(&reveal,1500);lv_anim_set_duration(&reveal,350);
  lv_anim_set_exec_cb(&reveal,[](void* object,int32_t opacity){lv_obj_set_style_opa(static_cast<lv_obj_t*>(object),opacity,0);});
  lv_anim_set_completed_cb(&reveal,[](lv_anim_t* a){splashActive=false;lv_obj_delete(static_cast<lv_obj_t*>(a->var));});lv_anim_start(&reveal);
-
-
+ // Top layer keeps the knob battery visible above every page and the splash.
+ auto* battery=lv_obj_create(lv_layer_top());lv_obj_remove_style_all(battery);
+ lv_obj_set_size(battery,66,18);lv_obj_align(battery,LV_ALIGN_TOP_MID,0,8);
+ lv_obj_remove_flag(battery,LV_OBJ_FLAG_CLICKABLE);lv_obj_remove_flag(battery,LV_OBJ_FLAG_SCROLLABLE);
+ lv_obj_set_style_bg_color(battery,color(theme::Background),0);lv_obj_set_style_bg_opa(battery,LV_OPA_COVER,0);lv_obj_set_style_radius(battery,5,0);
+ auto* batteryText=label(battery,"--%",0,0,&font_inter_12,theme::Muted);
+ lv_obj_align(batteryText,LV_ALIGN_RIGHT_MID,-3,0);
+ lv_obj_add_event_cb(battery,[](lv_event_t* e){
+   lv_area_t a;lv_obj_get_coords(static_cast<lv_obj_t*>(lv_event_get_target(e)),&a);
+   const int pct=board::batteryPercent();const auto ink=color(pct>=0&&pct<=15?0xFF6B60:theme::Muted);
+   lv_draw_rect_dsc_t d;lv_draw_rect_dsc_init(&d);d.bg_opa=LV_OPA_TRANSP;d.border_color=ink;d.border_width=1;d.radius=2;
+   lv_area_t body={a.x1+3,a.y1+4,a.x1+23,a.y1+13};lv_draw_rect(lv_event_get_layer(e),&d,&body);
+   d.border_width=0;d.bg_color=ink;d.bg_opa=LV_OPA_COVER;d.radius=0;
+   lv_area_t cap={a.x1+24,a.y1+7,a.x1+25,a.y1+10};lv_draw_rect(lv_event_get_layer(e),&d,&cap);
+   if(pct>0){lv_area_t fill={a.x1+5,a.y1+6,a.x1+5+(16*pct/100),a.y1+11};lv_draw_rect(lv_event_get_layer(e),&d,&fill);}
+ },LV_EVENT_DRAW_MAIN,nullptr);
+ lv_timer_create([](lv_timer_t* t){
+   auto* text=static_cast<lv_obj_t*>(lv_timer_get_user_data(t));const int pct=board::batteryPercent();
+   char value[8];if(pct<0)snprintf(value,sizeof(value),"--%%");else snprintf(value,sizeof(value),"%d%%",pct);
+   if(strcmp(lv_label_get_text(text),value)){lv_label_set_text(text,value);lv_obj_invalidate(lv_obj_get_parent(text));}
+ },1000,batteryText);
 }
 bool selectingTrainer(){return choosing;}
 bool voiceAction(const voice::Event& event){

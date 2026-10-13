@@ -19,7 +19,7 @@ static int pointerX=180,pointerY=45;
 static uint32_t ringColor=0;
 static int isoCalls=0,isoRequestedIndex=-1,isoRequestedValue=-1;
 static int rotation=0,settingCalls=0,bandCalls=0,bandRequested=-1,damperCalls=0,damperRequested=-1;
-namespace board {void traceDial(const char*,int,int,int,int,int,bool,bool,uint32_t){} void setRingColor(uint32_t rgb){ringColor=rgb;} bool pollRotate(RotateEvent& ev){if(!rotation)return false;ev={static_cast<int8_t>(rotation),now};rotation=0;return true;}}
+namespace board {int batteryPercent(){return 76;} void traceDial(const char*,int,int,int,int,int,bool,bool,uint32_t){} void setRingColor(uint32_t rgb){ringColor=rgb;} bool pollRotate(RotateEvent& ev){if(!rotation)return false;ev={static_cast<int8_t>(rotation),now};rotation=0;return true;}}
 namespace vlink {
 VoltraLink voltraLink;
 DeviceState VoltraLink::state(){return device;}
@@ -56,7 +56,11 @@ int main(){
  strcpy(device.trainers[0].name,"VOLTRA - Left");strcpy(device.trainers[1].name,"VOLTRA - Right");
  for(auto& trainer:device.trainers){trainer.seen=true;trainer.lastSeenMs=now;}
  device.link=vlink::LinkState::Ready;device.mode=1;device.fitnessMode=4;device.weightLbs=61;device.chainsLbs=10;device.inverseChainsEnabled=0;device.cableCm=30;device.cableOffsetCm=0;device.cableMs=now;device.lengthUnitRaw=0;device.eccentricLbs=15;device.battery=86;device.reps=8;device.statusMs=100;device.settingsMs=100;device.selected=0;device.session=1;
- ui::begin();now+=900;snapshot("build/preview-splash.ppm");now+=1200;snapshot("build/preview-selector.ppm");
+ ui::begin();
+ auto* batteryWidget=lv_obj_get_child(lv_layer_top(),-1);
+ assert(!lv_obj_has_flag(batteryWidget,LV_OBJ_FLAG_CLICKABLE));
+ lv_obj_update_layout(batteryWidget);assert(lv_obj_get_width(batteryWidget)==66);
+ now+=900;snapshot("build/preview-splash.ppm");now+=1200;snapshot("build/preview-selector.ppm");
  auto* selector=lv_obj_get_child(lv_screen_active(),-1);lv_obj_send_event(lv_obj_get_child(selector,2),LV_EVENT_CLICKED,nullptr);snapshot("build/preview-weight.ppm");
  // Twin: observed controller state, combined rounded weight, icon, disabled follower.
  device.weightLbs=179;device.twinConnection=2;device.twinMs=now;device.twinLastRole=1;device.twinRoleMs=now;

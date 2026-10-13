@@ -18,6 +18,29 @@ esp_timer_handle_t encoderTimer;
 uint32_t touchReads=0,touchErrors=0,touchPresses=0,rotateEvents=0,rotateLeft=0,rotateRight=0;
 int touchX=-1,touchY=-1;
 bool wasTouched=false;
+int batteryLevel=-1;
+uint32_t batteryMv=0;
+void sampleBattery(lv_timer_t*) {
+  // GPIO6 is BAT_ADC, through a 1:1 divider. Spread oversampling across
+  // timer calls so ADC work never stalls a touch/encoder frame.
+  static uint32_t sum=0;static unsigned count=0;static float filtered=0;
+  sum+=analogReadMilliVolts(6)*2;
+  if(++count<32)return;
+  const float mv=sum/32.0f;sum=0;count=0;batteryMv=static_cast<uint32_t>(mv);
+  if(mv<3000||mv>5500){batteryLevel=-1;filtered=0;return;}
+  filtered=filtered==0?mv:filtered+(mv-filtered)*0.15f;
+  // USB can raise the measured system rail above cell voltage. Do not
+  // report it as a full battery; hysteresis avoids flashing 100% / unknown.
+  static bool railHigh=false;
+  if(filtered>4250)railHigh=true;
+  else if(filtered<4150)railHigh=false;
+  if(railHigh){batteryLevel=-1;return;}
+  // Approximation only: voltage varies with load and USB power. No charge
+  // status pin is available, so do not claim that the battery is charging.
+  int pct=static_cast<int>((filtered-3200)/10+0.5f);
+  pct=pct<0?0:(pct>100?100:pct);
+  if(batteryLevel<0||abs(pct-batteryLevel)>=2||pct==0||pct==100)batteryLevel=pct;
+}
 void sampleEncoder(void*) {
   const uint32_t us = micros();
   const bool right = rightFilter.sample(gpio_get_level(GPIO_NUM_1)==0,us);
@@ -54,7 +77,8 @@ bool begin() {
   pinMode(8,OUTPUT);digitalWrite(8,LOW);delay(10);digitalWrite(8,HIGH);delay(100);
   // Disable touch auto-sleep so taps remain responsive.
   Wire.beginTransmission(0x15);Wire.write(0xFE);Wire.write(0xFF);Wire.endTransmission();
-  lv_init();lv_tick_set_cb([]()->uint32_t{return millis();});
+  pinMode(6,INPUT);analogSetPinAttenuation(6,ADC_11db);
+  lv_init();lv_timer_create(sampleBattery,50,nullptr);lv_tick_set_cb([]()->uint32_t{return millis();});
   auto* d=lv_display_create(360,360);lv_display_set_color_format(d,LV_COLOR_FORMAT_RGB565);
   constexpr size_t bytes=360*30*2;
   void* buffer=heap_caps_malloc(bytes,MALLOC_CAP_DMA|MALLOC_CAP_INTERNAL);
@@ -78,6 +102,7 @@ void traceDial(const char* reason,int field,int direction,int before,int target,
  if(Serial.availableForWrite()<190)return;
  Serial.printf("[dial] %s field=%d dir=%d before=%d target=%d actual=%d pending=%d sent=%d event=%lu now=%lu\n",reason,field,direction,before,target,actual,pending,sent,(unsigned long)eventMs,(unsigned long)millis());
 }
-void logInputs(){Serial.printf("[input] reads=%lu errors=%lu presses=%lu xy=%d,%d turns=%lu left=%lu right=%lu\n",(unsigned long)touchReads,(unsigned long)touchErrors,(unsigned long)touchPresses,touchX,touchY,(unsigned long)rotateEvents,(unsigned long)rotateLeft,(unsigned long)rotateRight);}
+void logInputs(){if(Serial.availableForWrite()>80)Serial.printf("[battery] mv=%lu estimatedPercent=%d\n",(unsigned long)batteryMv,batteryLevel);Serial.printf("[input] reads=%lu errors=%lu presses=%lu xy=%d,%d turns=%lu left=%lu right=%lu\n",(unsigned long)touchReads,(unsigned long)touchErrors,(unsigned long)touchPresses,touchX,touchY,(unsigned long)rotateEvents,(unsigned long)rotateLeft,(unsigned long)rotateRight);}
+int batteryPercent(){return batteryLevel;}
 void setBacklight(uint8_t level){analogWrite(21,level);}
 }
