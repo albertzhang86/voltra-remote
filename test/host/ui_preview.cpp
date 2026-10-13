@@ -19,6 +19,11 @@ static int pointerX=180,pointerY=45;
 static uint32_t ringColor=0;
 static int isoCalls=0,isoRequestedIndex=-1,isoRequestedValue=-1;
 static int rotation=0,settingCalls=0,bandCalls=0,bandRequested=-1,damperCalls=0,damperRequested=-1;
+namespace tvbridge {
+bool open=false;
+void openPairing(){open=true;} void disconnect(){open=false;}
+bool connected(){return false;} bool pairing(){return open;} int passkey(){return open?123456:-1;}
+}
 namespace board {int batteryPercent(){return 76;} void traceDial(const char*,int,int,int,int,int,bool,bool,uint32_t){} void setRingColor(uint32_t rgb){ringColor=rgb;} bool pollRotate(RotateEvent& ev){if(!rotation)return false;ev={static_cast<int8_t>(rotation),now};rotation=0;return true;}}
 namespace vlink {
 VoltraLink voltraLink;
@@ -61,6 +66,15 @@ int main(){
  assert(!lv_obj_has_flag(batteryWidget,LV_OBJ_FLAG_CLICKABLE));
  lv_obj_update_layout(batteryWidget);assert(lv_obj_get_width(batteryWidget)==66);
  now+=900;snapshot("build/preview-splash.ppm");now+=1200;snapshot("build/preview-selector.ppm");
+ auto* trainerSelector=lv_obj_get_child(lv_screen_active(),-1);
+ lv_obj_send_event(lv_obj_get_child(trainerSelector,5),LV_EVENT_CLICKED,nullptr);
+ auto* tvPanel=lv_obj_get_child(lv_layer_top(),0);
+ assert(!lv_obj_has_flag(tvPanel,LV_OBJ_FLAG_HIDDEN));
+ lv_obj_send_event(lv_obj_get_child(tvPanel,3),LV_EVENT_CLICKED,nullptr);
+ rotation=1;snapshot("build/preview-tv-pairing.ppm");
+ assert(strcmp(lv_label_get_text(lv_obj_get_child(tvPanel,2)),"123456")==0);
+ assert(settingCalls==0&&loadCalls==0);
+ lv_obj_send_event(lv_obj_get_child(tvPanel,4),LV_EVENT_CLICKED,nullptr);
  auto* selector=lv_obj_get_child(lv_screen_active(),-1);lv_obj_send_event(lv_obj_get_child(selector,2),LV_EVENT_CLICKED,nullptr);snapshot("build/preview-weight.ppm");
  // Twin: observed controller state, combined rounded weight, icon, disabled follower.
  device.weightLbs=179;device.twinConnection=2;device.twinMs=now;device.twinLastRole=1;device.twinRoleMs=now;

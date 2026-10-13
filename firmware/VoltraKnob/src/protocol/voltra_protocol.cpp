@@ -183,11 +183,11 @@ Event decode(const uint8_t* d, size_t n) {
     }
     return e;
   }
-  if (n >= 30 && d[0] == 0x55 && d[1] == 0x3a && d[2] == 0x04 && d[3] == 0x70) {
-    e.type = EventType::Telemetry; e.phase = d[13]; return e;
+  if (n == 58 && d[0] == 0x55 && d[1] == 0x3a && d[2] == 0x04 && d[3] == 0x70 && d[10]!=0x10) {
+    e.type = EventType::Telemetry; e.phase = d[13]; e.activeWeightTenths=u16le(d,22); return e;
   }
   if (vendor(d, n, 0x82, 0x3b) && n >= 74) {
-    e.type = EventType::PerRep; e.setCounter = d[15]; e.repCount = d[17]; return e;
+    e.type = EventType::PerRep; e.setCounter = u16le(d,15); e.repCount = u16le(d,17); return e;
   }
   if (vendor(d, n, 0x85, 0x5f) && n >= 110) {
     e.type = EventType::SetSummary; e.repCount = u16le(d, 26); return e;

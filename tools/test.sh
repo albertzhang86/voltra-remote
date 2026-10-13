@@ -25,3 +25,6 @@ build/host/test_voice_audio
 
 $CXX test/test_voice_capture.cpp -o build/host/test_voice_capture
 build/host/test_voice_capture
+
+$CXX test/test_tv_bridge.cpp -o build/host/test_tv_bridge
+build/host/test_tv_bridge

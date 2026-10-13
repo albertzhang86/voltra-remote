@@ -12,13 +12,15 @@ DeviceState current;
 SemaphoreHandle_t mutex;
 struct Lock { Lock(){xSemaphoreTake(mutex,portMAX_DELAY);} ~Lock(){xSemaphoreGive(mutex);} };
 enum class CommandType:uint8_t {Setting,Load,Mode,Cable,SelectParameter,BandMaximum,DamperLevel,Isokinetic};
-struct Command {CommandType type;Parameter parameter;int value;uint32_t session;};
+struct Command {CommandType type;Parameter parameter;int value;uint32_t session;uint32_t tvEpoch=0,deadline=0;};
 QueueHandle_t queue;
 std::atomic<bool> disconnected{false}, stopRequested{false};
 std::atomic<bool> discoveryVisible{true};
+std::atomic<uint32_t> tvEpoch{0};
 NimBLEClient* client=nullptr;
 NimBLERemoteCharacteristic* writer=nullptr;
 uint32_t workerSession=0;
+uint32_t workerTvEpoch=0,workerTvDeadline=0;
 int workerSlot=-1;
 bool settingsDirty=false;
 int diagnosticReplies=0;
@@ -32,6 +34,7 @@ void resetReadings(){
   current.weightUnitRaw=-1;current.weightLbs=-1;current.chainsLbs=-1;current.inverseChainsEnabled=-1;current.eccentricLbs=-1000;
   current.controlBusyUntil=0;current.mode=-1;current.fitnessMode=-1;current.battery=-1;current.reps=0;
   current.loaded=false;current.armed=false;current.settingsMs=0;current.statusMs=0;current.confirmSeq=0;
+  current.activeWeightTenths=-1;current.forceMs=0;current.repMs=0;
 }
 void saveTrainers(){
   DeviceState snapshot;{Lock lock;snapshot=current;settingsDirty=false;}
@@ -99,10 +102,13 @@ void notify(NimBLERemoteCharacteristic*,uint8_t* bytes,size_t size,bool){
     current.armed=voltra::fitnessModeArmed(e.fitnessMode);
   }
   if(e.battery>=0 && e.battery<=100)current.battery=e.battery;
-  if(e.repCount>=0)current.reps=e.repCount;
+  if(e.repCount>=0){current.reps=e.repCount;current.repMs=now;}
+  if(e.activeWeightTenths>=0&&e.activeWeightTenths<=10000){current.activeWeightTenths=e.activeWeightTenths;current.forceMs=now;}
 }
 bool send(voltra::Frame frame){
   if(!sameSession()||disconnected||!writer||!client->isConnected())return false;
+  if(workerTvEpoch&&frame.len>10&&frame.data[10]==0x11&&
+     (workerTvEpoch!=tvEpoch.load()||static_cast<int32_t>(workerTvDeadline-millis())<=0))return false;
   // Only the worker owns BLE writes. UI selection invalidates session before a new connection.
   if(!writer->writeValue(frame.data,frame.len,writer->canWrite())){disconnected=true;return false;}
   return true;
@@ -138,6 +144,7 @@ bool connect(){
 void pump(){
   uint32_t lastPoll=0;int configCursor=0;
   while(sameSession()&&!disconnected&&client->isConnected()){
+    workerTvEpoch=0;workerTvDeadline=0;
     auto* scan=NimBLEDevice::getScan();
     if(discoveryVisible.load()){if(!scan->isScanning())scan->start(0,false,true);}
     else if(scan->isScanning())scan->stop();
@@ -151,6 +158,8 @@ void pump(){
     }
     Command command;
     if(xQueueReceive(queue,&command,0)==pdTRUE && command.session==workerSession){
+      if(command.tvEpoch&&(command.tvEpoch!=tvEpoch.load()||static_cast<int32_t>(command.deadline-millis())<=0))continue;
+      workerTvEpoch=command.tvEpoch;workerTvDeadline=command.deadline;
       DeviceState s;{Lock lock;s=current;current.controlBusyUntil=millis()+10000;}
       if(command.type==CommandType::BandMaximum){
         uint8_t storage[19];voltra::Frame f;
@@ -304,6 +313,41 @@ void VoltraLink::begin(){
  xTaskCreatePinnedToCore(task,"VOLTRA",8192,nullptr,2,nullptr,0);
 }
 DeviceState VoltraLink::state(){Lock lock;return current;}
+void VoltraLink::setTvSession(uint32_t epoch){tvEpoch=epoch;}
+bool VoltraLink::requestTvSetting(uint32_t epoch,uint32_t session,uint32_t deadline,bool mode,uint16_t field,int value){
+ Lock lock;const uint32_t now=millis();
+ if(!epoch||epoch!=tvEpoch.load()||session!=current.session||static_cast<int32_t>(deadline-now)<=0||static_cast<int32_t>(deadline-now)>2000)return false;
+ // Native Twin roles are not verified; TV control stays read-only for that state.
+ if(!fresh(current,now)||!current.twinMs||now-current.twinMs>=3500||current.twinConnection==2||current.parameterSelectionPending||current.cableActive)return false;
+ if(current.controlBusyUntil&&static_cast<int32_t>(current.controlBusyUntil-now)>0)return false;
+ Command c{CommandType::Setting,Parameter::Weight,value,current.session,epoch,deadline};
+ if(mode){
+   if((value!=1&&value!=2&&value!=4&&value!=7)||!canSwitch(current,now)||!voltra::fitnessModeUnloaded(current.fitnessMode))return false;
+   c.type=CommandType::Mode;
+ }else switch(field){
+   case 0x3e86:case 0x3e87:case 0x3e88:{
+     c.parameter=field==0x3e86?Parameter::Weight:field==0x3e88?Parameter::Eccentric:current.inverseChainsEnabled==1?Parameter::InverseChains:Parameter::Chains;
+     if(!canEditParameter(current,now,c.parameter))return false;
+     if((field==0x3e86&&(value<5||value>200||current.eccentricLbs<-195||value+current.eccentricLbs<5||value+current.eccentricLbs>200))||
+        (field==0x3e87&&(value<0||value>100||current.inverseChainsEnabled<0))||
+        (field==0x3e88&&(value<-195||value>195||current.weightLbs<5||current.weightLbs+value<5||current.weightLbs+value>200)))return false;
+     break;
+   }
+   case 0x53b0:
+     if(!canEdit(current,now)||(value!=0&&value!=1))return false;
+     c.type=CommandType::SelectParameter;c.parameter=value?Parameter::InverseChains:Parameter::Chains;break;
+   case 0x5362:if(!canEditBand(current,now)||value<15||value>200)return false;c.type=CommandType::BandMaximum;break;
+   case 0x5103:if(!canEditDamper(current,now)||value<0||value>9)return false;c.type=CommandType::DamperLevel;break;
+   default:{
+     const int index=voltra::modeParameterIndex(field);
+     if(index<7||index>11||!canEditIsokinetic(current,now,index)||!voltra::validIsokineticSetting(index,value))return false;
+     c.type=CommandType::Isokinetic;c.parameter=static_cast<Parameter>(index);break;
+   }
+ }
+ if(xQueueSend(queue,&c,0)!=pdTRUE)return false;
+ if(c.type==CommandType::SelectParameter)current.parameterSelectionPending=true;
+ current.controlBusyUntil=now+6000;return true;
+}
 void VoltraLink::setDiscoveryVisible(bool visible){discoveryVisible.store(visible);}
 bool VoltraLink::selectTrainer(int slot){
  Lock lock;

@@ -27,6 +27,8 @@ struct DeviceState {
   bool parameterSelectionPending=false;
   int weightUnitRaw=-1;
   int mode=-1, fitnessMode=-1, battery=-1, reps=0;
+  int activeWeightTenths=-1;
+  uint32_t forceMs=0,repMs=0;
   bool loaded=false, armed=false;
   uint32_t controlBusyUntil=0;
   uint32_t settingsMs=0, statusMs=0, confirmSeq=0;
@@ -98,6 +100,9 @@ class VoltraLink {
   bool selectTrainer(int slot);
   void setDiscoveryVisible(bool visible);
   bool requestSetting(Parameter parameter,int value);
+  // TV commands cannot load/unload, select a trainer, or bypass local gates.
+  void setTvSession(uint32_t epoch);
+  bool requestTvSetting(uint32_t epoch,uint32_t session,uint32_t deadline,bool mode,uint16_t field,int value);
   bool requestBandMaximum(int pounds);
   bool requestDamperLevel(int index);
   bool requestIsokinetic(int index,int value);

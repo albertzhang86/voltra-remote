@@ -49,6 +49,28 @@ python3 tools/preview.py  # optional: render actual LVGL UI on macOS
 
 `tools/setup.sh` installs the pinned local dependencies on a fresh Mac. Arduino's packaged ctags is Intel-only; setup builds its native source on Apple Silicon if necessary.
 
+## TV Bluetooth bridge (development)
+
+The current source adds **TV link** at the bottom of trainer selection. Choose
+**Pair TV**, then **VOLTRA → Via knob → Find knob** in Super AI Gym. Enter the
+knob's displayed six-digit code in Android's Bluetooth pairing prompt. The bridge
+requires authenticated encryption and advertises for two minutes only when opened.
+Disconnect TV is available on the same knob page; reconnect by reopening pairing.
+
+The TV follows the knob's selected trainer and can request the four mode/settings
+changes; the existing knob command gates and trainer confirmation remain authoritative.
+Local draft edits block TV changes. The bridge cannot load/unload, select a trainer,
+or create/exit native Twin. TV control of already-Twin trainers is read-only.
+Expired commands or commands for an old trainer/TV connection are rejected.
+Live independent cable force is decoded from stream telemetry in tenths of a pound;
+it is not substituted with set weight. Knob and trainer batteries remain separate.
+
+Protocol definitions are in `src/tv/bridge_protocol.h` and the public `android-voltra`
+library's `docs/knob-bridge.md`. Host protocol/UI tests and compilation are available;
+real Google TV pairing, simultaneous trainer connection and control/readback still
+need physical validation. This development firmware has not been flashed or packaged
+as a release as part of this integration.
+
 ## USB programming
 
 Manufacturer instructions: disable **HID**, exit Settings to save, then restart the knob. If USB serial still does not enumerate, enter BOOT/download mode. Verify the specific `/dev/cu.usbmodem...` port before proceeding.

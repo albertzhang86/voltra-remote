@@ -5,6 +5,8 @@ build/
 *.map
 node_modules/
 .DS_Store
+__pycache__/
+*.py[cod]
 WORKLOG.md
 
 .tools/

@@ -111,12 +111,15 @@ static void testDecode() {
   // Telemetry stream, phase eccentric.
   n = synth(b, 58, "553a0470", {{13, 3}});   // real stream frames are 0x3a = 58 bytes
   e = decode(b, n); CHECK(e.type == EventType::Telemetry); CHECK_EQ(e.phase, 3);
+  b[22]=123;b[23]=1;e=decode(b,n);CHECK_EQ(e.activeWeightTenths,379);
+  b[10]=0x10;e=decode(b,n);CHECK_EQ(e.activeWeightTenths,-1);
   n = synth(b, 20, "553a0470", {{1, 0x3a}, {13, 3}});   // too short (keep the 0x3a header byte)
   e = decode(b, n); CHECK(e.type == EventType::Unknown);
 
   // Vendor per-rep: 74 bytes, aa 82 3b at 10..12, setCounter at 15, repCount at 17.
   n = synth(b, 74, "554a04", {{10,0xaa},{11,0x82},{12,0x3b},{15,2},{17,7}});
   e = decode(b, n); CHECK(e.type == EventType::PerRep); CHECK_EQ(e.repCount, 7); CHECK_EQ(e.setCounter, 2);
+  b[16]=1;b[18]=1;e=decode(b,n);CHECK_EQ(e.repCount,263);CHECK_EQ(e.setCounter,258);
 
   // Vendor set summary: 110 bytes, aa 85 5f, repCount u16 at 26.
   n = synth(b, 110, "556e04", {{10,0xaa},{11,0x85},{12,0x5f},{26,12},{27,0}});

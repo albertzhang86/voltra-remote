@@ -4,13 +4,14 @@
 #include "src/board/board.h"
 #include "src/ui/ui.h"
 #include "src/link/voltra_link.h"
+#include "src/tv/tv_bridge.h"
 void setup(){
  // Keep touch/rendering ahead of speech inference (priority 5); the loop
  // blocks between updates so audio still runs. BLE/audio feed stay on core 0.
  vTaskPrioritySet(nullptr,6);
  Serial.setTxBufferSize(2048);Serial.begin(115200);Serial.setTxTimeoutMs(0);delay(100);Serial.println("[boot] Guition Voltra Remote / kg / two trainers");
  if(!board::begin()){Serial.println("[error] Board initialization failed; BLE disabled");while(true)delay(1000);}
- vlink::voltraLink.begin();ui::begin();voice::begin();Serial.println("[ready] Display initialized; scanning for two Voltras");
+ vlink::voltraLink.begin();ui::begin();tvbridge::begin();voice::begin();Serial.println("[ready] Display initialized; scanning for two Voltras");
 }
 void loop(){
  static uint32_t previousLoop=0,maxLoopGap=0,loops=0;
@@ -19,7 +20,7 @@ void loop(){
  if(previousLoop && now-previousLoop>maxLoopGap)maxLoopGap=now-previousLoop;
  if(previousLoop){const uint32_t gap=now-previousLoop;windowGap=std::max(windowGap,gap);if(gap>50)++slowLoops;}
  previousLoop=now;++loops;
- const uint32_t uiStart=micros();ui::loop();voice::loop();
+ const uint32_t uiStart=micros();ui::loop();voice::loop();tvbridge::loop();
  uiMaxUs=std::max(uiMaxUs,uint32_t(micros()-uiStart));
  const uint32_t renderStart=micros();lv_timer_handler();
  renderMaxUs=std::max(renderMaxUs,uint32_t(micros()-renderStart));

@@ -9,6 +9,7 @@
 #include "../board/board.h"
 #include "../link/voltra_link.h"
 #include "../app/remote_model.h"
+#include "../tv/tv_bridge.h"
 LV_IMAGE_DECLARE(polar_bear_logo);
 namespace ui {
 namespace {
@@ -18,6 +19,8 @@ lv_style_t filledTickStyle;
 lv_obj_t *tabs[4],*tabValues[4],*isoLabels[4],*modePanel;
 lv_obj_t *bandDetails,*damperRoman,*switchController,*switchControllerText;
 bool choosingController=false;
+bool tvPage=false;
+lv_obj_t *tvPanel,*tvStatus,*tvPin,*tvButtonText;
 bool pairedChoice(const vlink::DeviceState& s,int slot,uint32_t now){return !choosingController&&vlink::twinActive(s,now)&&s.selected>=0&&slot!=s.selected&&s.trainers[slot].address[0];}
 lv_obj_t *twinIcon;
 uint32_t twinInk=theme::Muted,twinCutout=theme::Background;
@@ -271,6 +274,20 @@ void begin(){
  for(int i=0;i<2;++i){choices[i]=button(selector,248,66,0,112+i*79,theme::Surface);lv_obj_set_style_bg_color(choices[i],color(theme::Surface),LV_STATE_DISABLED);lv_obj_set_style_color_filter_opa(choices[i],LV_OPA_TRANSP,LV_STATE_DISABLED);choiceLabels[i]=label(choices[i],"Searching...",0,0,&font_inter_16);lv_obj_set_width(choiceLabels[i],214);lv_label_set_long_mode(choiceLabels[i],LV_LABEL_LONG_DOT);lv_obj_set_style_text_align(choiceLabels[i],LV_TEXT_ALIGN_CENTER,0);lv_obj_align(choiceLabels[i],LV_ALIGN_CENTER,0,-11);choiceDetails[i]=label(choices[i],"",0,0,&font_inter_14,theme::Muted);lv_obj_align(choiceDetails[i],LV_ALIGN_CENTER,0,12);lv_obj_add_event_cb(choices[i],choose,LV_EVENT_CLICKED,reinterpret_cast<void*>(static_cast<intptr_t>(i)));}
  switchController=button(selector,194,34,0,286,theme::SurfaceLow);switchControllerText=label(switchController,"Switch controller",0,0,&font_inter_14);lv_obj_center(switchControllerText);lv_obj_add_flag(switchController,LV_OBJ_FLAG_HIDDEN);
  lv_obj_add_event_cb(switchController,[](lv_event_t*){const auto s=vlink::voltraLink.state();if(vlink::canSwitch(s,millis())&&!pending()&&!loadSentMs)choosingController=!choosingController;},LV_EVENT_CLICKED,nullptr);
+ auto* tvButton=button(selector,92,26,0,323,theme::SurfaceLow);
+ auto* tvLabel=label(tvButton,"TV link",0,0,&font_inter_12);lv_obj_center(tvLabel);
+ tvPanel=lv_obj_create(lv_layer_top());lv_obj_set_size(tvPanel,360,360);lv_obj_center(tvPanel);
+ setBgColor(tvPanel,color(theme::Background),0);lv_obj_set_style_border_width(tvPanel,0,0);lv_obj_set_style_pad_all(tvPanel,0,0);
+ lv_obj_remove_flag(tvPanel,LV_OBJ_FLAG_SCROLLABLE);lv_obj_add_flag(tvPanel,LV_OBJ_FLAG_HIDDEN);
+ label(tvPanel,"TV BLUETOOTH",0,55,&font_inter_20);
+ tvStatus=label(tvPanel,"Pair with your TV",0,103,&font_inter_14,theme::Muted);
+ tvPin=label(tvPanel,"",0,138,&font_inter_48,theme::Text);
+ auto* pair=button(tvPanel,224,44,0,215,theme::Surface);
+ tvButtonText=label(pair,"Pair TV",0,0,&font_inter_16);lv_obj_center(tvButtonText);
+ lv_obj_add_event_cb(pair,[](lv_event_t*){if(tvbridge::connected()||tvbridge::pairing())tvbridge::disconnect();else tvbridge::openPairing();},LV_EVENT_CLICKED,nullptr);
+ auto* back=button(tvPanel,130,36,0,274,theme::SurfaceLow);auto* backText=label(back,"Back",0,0,&font_inter_14);lv_obj_center(backText);
+ lv_obj_add_event_cb(back,[](lv_event_t*){tvPage=false;lv_obj_add_flag(tvPanel,LV_OBJ_FLAG_HIDDEN);},LV_EVENT_CLICKED,nullptr);
+ lv_obj_add_event_cb(tvButton,[](lv_event_t*){if(tvCanEdit()&&vlink::canSwitch(vlink::voltraLink.state(),millis())){tvPage=true;lv_obj_remove_flag(tvPanel,LV_OBJ_FLAG_HIDDEN);}},LV_EVENT_CLICKED,nullptr);
  // Non-blocking startup fade. BLE discovery proceeds underneath; controls stay covered.
  auto* splash=lv_obj_create(lv_layer_top());lv_obj_set_size(splash,360,360);lv_obj_center(splash);
  setBgColor(splash,color(theme::Background),0);lv_obj_set_style_border_width(splash,0,0);
@@ -307,6 +324,7 @@ void begin(){
  },1000,batteryText);
 }
 bool selectingTrainer(){return choosing;}
+bool tvCanEdit(){return !pending()&&!loadSentMs&&!choosingCable&&!choosingMode&&!splashActive;}
 bool voiceAction(const voice::Event& event){
  static uint32_t releaseAt=0;static bool released=false;
  const uint32_t now=millis();const auto s=vlink::voltraLink.state();
@@ -321,6 +339,13 @@ bool voiceAction(const voice::Event& event){
  loadSentMs=now;return true;
 }
 void loop(){
+ if(tvPage){
+   board::RotateEvent ignored;while(board::pollRotate(ignored)){}
+   const int pin=tvbridge::passkey();char text[16]{};if(pin>=0)snprintf(text,sizeof(text),"%06d",pin);
+   setText(tvPin,text);setText(tvStatus,tvbridge::connected()?"Connected to TV":pin>=0?"Enter this code on your TV":tvbridge::pairing()?"Find Voltra Remote on TV":"Pair with your TV");
+   setText(tvButtonText,tvbridge::connected()?"Disconnect TV":tvbridge::pairing()?"Cancel pairing":"Pair TV");
+   return;
+ }
  vlink::voltraLink.setDiscoveryVisible(choosing);
  if(pendingSwipe){const int direction=pendingSwipe;pendingSwipe=0;navigateSwipe(direction);}
  const uint32_t now=millis();const auto s=vlink::voltraLink.state();

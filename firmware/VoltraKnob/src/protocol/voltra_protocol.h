@@ -66,6 +66,7 @@ struct Event {
   int guidedState = -1;       // Settings: 53c7 register
   int guidedCtrl = -1;        // Settings: 53c9 register
   int battery = -1;     // Battery, 0..100
+  int activeWeightTenths = -1; // Live cable force in tenths of a pound; never set weight.
   int phase = -1;       // Telemetry: 0 idle, 1 concentric, 2 hold, 3 eccentric
   int repCount = -1;    // PerRep, SetSummary
   int setCounter = -1;  // PerRep
