@@ -144,6 +144,7 @@ void pump(){
     if(stopRequested.exchange(false)){
       xQueueReset(queue);{Lock lock;current.parameterSelectionPending=false;}
       if(!send(voltra::stopFrame()))break;
+      {Lock lock;++current.stopFramesSent;current.lastStopFrameMs=millis();}
       message("Unload sent; checking");
       send(voltra::readSettingsFrame());
       continue;
@@ -351,7 +352,10 @@ bool VoltraLink::requestCable(bool open){
  current.controlBusyUntil=millis()+6000;return true;
 }
 bool VoltraLink::requestLoad(uint32_t expectedSession){Lock lock;if((expectedSession!=UINT32_MAX&&expectedSession!=current.session)||!canLoad(current,millis()))return false;Command c{CommandType::Load,Parameter::Weight,current.mode,current.session};bool queued=xQueueSend(queue,&c,0)==pdTRUE;if(queued)current.controlBusyUntil=millis()+6000;return queued;}
-bool VoltraLink::requestUnload(uint32_t expectedSession){Lock lock;if((expectedSession!=UINT32_MAX&&expectedSession!=current.session)||current.link!=LinkState::Ready)return false;stopRequested=true;return true;}
+bool VoltraLink::requestUnload(uint32_t expectedSession,UnloadSource source){Lock lock;if((expectedSession!=UINT32_MAX&&expectedSession!=current.session)||current.link!=LinkState::Ready)return false;
+ if(source==UnloadSource::Touch)++current.unloadTouchRequests;else if(source==UnloadSource::Voice)++current.unloadVoiceRequests;else ++current.unloadOtherRequests;
+ current.lastUnloadRequestMs=millis();current.lastUnloadRequestSession=current.session;
+ stopRequested=true;return true;}
 bool VoltraLink::requestWeightMode(){return requestMode(1);}
 bool VoltraLink::requestMode(int mode){
  Lock lock;voltra::Frame frame;

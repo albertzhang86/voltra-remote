@@ -91,6 +91,8 @@ The prebuilt ZIP contains a Python installer, firmware with SHA-256 checks, sour
 
 ## Voice control
 
+**Unreleased mitigation (2026-10-12):** voice-triggered loading and unloading are temporarily disabled in the current source after a report of unintended unloading. Touch control remains active. Published r17 still enables voice actuation; the cause is under investigation. Recognition continues only for diagnostics, with no bottom-screen text.
+
 Release r17 enables local voice control: say “Load weight” to request loading, or “Release” / “Release weight” to request unloading. No wake phrase or touch is required. Load requires the selected trainer’s control page, fresh ready/unloaded state, confirmed settings and no pending edit/action. Release uses the priority unload path and remains available during a pending load or stale status. Commands are tied to the current connection session; duplicate Load cannot toggle into Unload. Voice control runs without bottom-screen labels; the trainer’s reported state drives the normal loaded/unloaded display. Recognition can miss or falsely detect speech; keep the physical unloading control available. The speech model and pronunciation settings are unchanged from the accepted recognition test.
 
 Microphone audio normally stays on-device without recording. Running `tools/capture_voice.py --port PORT --output build/voice-diagnostic` arms the explicit eight-second recording tap and disables voice actuation until reboot. Audio is retrieved locally over USB, with no cloud service. Upload using `tools/upload.py` so the speech-model partition is included. See [release notes](RELEASE_NOTES.md), [build instructions](BUILDING.md) and [test coverage](TESTING.md).

@@ -1,5 +1,6 @@
 #include "voice.h"
 #include "recognition.h"
+#include "control.h"
 #include "audio_input.h"
 #include "capture.h"
 #include "replay.h"
@@ -146,6 +147,6 @@ void logStatus(){
  Serial.printf("[voice-decoder] peak=%u speechFrames=%u confidence=%.3f raw=%s match=%s\n",processedPeak,speechFrames,confidence,raw,match);
 
  unsigned frames=0,resets=0;int state=0,initErrors=0;sr_command_diagnostics(&frames,&resets,&state,&initErrors);
- Serial.printf("[voice] testOnly=0 directRelease=1 directLoad=1 frames=%u resets=%u mnState=%d initErrors=%d ready=%d registered=%u rawCmd=%u lastCmd=%d rawTimeout=%u modeError=%d chunks=%u errors=%u peak=%u mean=%u dc=%d rms=%u gainPct=%u wake=%u load=%u release=%u timeout=%u dropped=%u psram=%u\n",frames,resets,state,initErrors,int(ready.load()),registered.load(),rawCommands.load(),lastCommand.load(),rawTimeouts.load(),modeError.load(),chunks.load(),errors.load(),windowPeak.exchange(0),mean.load(),dc.load(),windowRms.exchange(0),gainPercent.load(),recognition.wakes,recognition.loads,recognition.releases,recognition.timeouts,dropped.load(),unsigned(ESP.getFreePsram()));
+ Serial.printf("[voice] testOnly=%d directRelease=1 directLoad=1 frames=%u resets=%u mnState=%d initErrors=%d ready=%d registered=%u rawCmd=%u lastCmd=%d rawTimeout=%u modeError=%d chunks=%u errors=%u peak=%u mean=%u dc=%d rms=%u gainPct=%u wake=%u load=%u release=%u timeout=%u dropped=%u psram=%u\n",int(!ACTUATION_ENABLED),frames,resets,state,initErrors,int(ready.load()),registered.load(),rawCommands.load(),lastCommand.load(),rawTimeouts.load(),modeError.load(),chunks.load(),errors.load(),windowPeak.exchange(0),mean.load(),dc.load(),windowRms.exchange(0),gainPercent.load(),recognition.wakes,recognition.loads,recognition.releases,recognition.timeouts,dropped.load(),unsigned(ESP.getFreePsram()));
 }
 }

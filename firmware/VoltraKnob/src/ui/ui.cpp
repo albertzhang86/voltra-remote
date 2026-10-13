@@ -95,7 +95,7 @@ void actionEvent(lv_event_t* event){
  if(code==LV_EVENT_CLICKED){
   const bool load=loadGesture,unload=unloadGesture;loadGesture=false;unloadGesture=false;
   if(s.session!=gestureSession||s.mode!=gestureMode)return;
-  if(unload){vlink::voltraLink.requestUnload();loadSentMs=0;}
+  if(unload){vlink::voltraLink.requestUnload(gestureSession,vlink::UnloadSource::Touch);loadSentMs=0;}
   else if(load&&vlink::canLoad(s,millis())&&!pending()&&vlink::voltraLink.requestLoad())loadSentMs=millis();
  }
  if(code==LV_EVENT_PRESS_LOST){loadGesture=false;unloadGesture=false;}
@@ -295,7 +295,7 @@ bool voiceAction(const voice::Event& event){
  if(!voice::canAct(event,s,now,controlPage,pending(),loadSentMs!=0,released&&now-releaseAt<1500))return false;
  loadGesture=false;unloadGesture=false;
  if(event.kind==voice::EventKind::Release){
-  if(!vlink::voltraLink.requestUnload(event.session))return false;
+  if(!vlink::voltraLink.requestUnload(event.session,vlink::UnloadSource::Voice))return false;
   loadSentMs=0;released=true;releaseAt=now;return true;
  }
  if(!vlink::voltraLink.requestLoad(event.session))return false;

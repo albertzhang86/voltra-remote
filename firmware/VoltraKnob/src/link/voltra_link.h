@@ -3,9 +3,13 @@
 #include "../protocol/mode_parameters.h"
 namespace vlink {
 enum class LinkState:uint8_t {Scanning,Connecting,Handshaking,Ready};
+enum class UnloadSource:uint8_t {Unknown,Touch,Voice};
 enum class Parameter:uint8_t {Weight,Chains,Eccentric,InverseChains};
 struct Trainer { char address[18]{}; char name[32]{}; uint8_t addressType=0; bool seen=false; uint32_t lastSeenMs=0; };
 struct DeviceState {
+  // RAM diagnostics survive connection changes, but reset on knob reboot.
+  uint32_t unloadTouchRequests=0,unloadVoiceRequests=0,unloadOtherRequests=0;
+  uint32_t lastUnloadRequestMs=0,lastUnloadRequestSession=0,stopFramesSent=0,lastStopFrameMs=0;
   int modeValues[voltra::MODE_PARAMETER_COUNT]{};
   uint32_t modeValueMs[voltra::MODE_PARAMETER_COUNT]{};
   LinkState link=LinkState::Scanning;
@@ -99,7 +103,7 @@ class VoltraLink {
   bool requestIsokinetic(int index,int value);
   bool requestParameter(Parameter parameter);
   bool requestCable(bool open);
-  bool requestLoad(uint32_t expectedSession=UINT32_MAX); bool requestUnload(uint32_t expectedSession=UINT32_MAX); bool requestWeightMode(); bool requestMode(int mode);
+  bool requestLoad(uint32_t expectedSession=UINT32_MAX); bool requestUnload(uint32_t expectedSession=UINT32_MAX,UnloadSource source=UnloadSource::Unknown); bool requestWeightMode(); bool requestMode(int mode);
 };
 extern VoltraLink voltraLink;
 }

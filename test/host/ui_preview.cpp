@@ -36,7 +36,7 @@ bool VoltraLink::requestDamperLevel(int index){if(!canEditDamper(device,now)||in
 bool VoltraLink::requestIsokinetic(int index,int value){if(!canEditIsokinetic(device,now,index)||!voltra::validIsokineticSetting(index,value))return false;++isoCalls;isoRequestedIndex=index;isoRequestedValue=value;return true;}
 bool VoltraLink::requestCable(bool open){if(open&&(!canSwitch(device,now)||device.loaded||device.armed||device.mode<=0))return false;device.cableActive=open;return true;}
 bool VoltraLink::requestLoad(uint32_t expectedSession){if(expectedSession!=UINT32_MAX&&expectedSession!=device.session)return false;++loadCalls;return canLoad(device,now);}
-bool VoltraLink::requestUnload(uint32_t expectedSession){if(expectedSession!=UINT32_MAX&&expectedSession!=device.session)return false;++unloadCalls;return true;}
+bool VoltraLink::requestUnload(uint32_t expectedSession,UnloadSource){if(expectedSession!=UINT32_MAX&&expectedSession!=device.session)return false;++unloadCalls;return true;}
 bool VoltraLink::requestWeightMode(){return requestMode(1);}
 bool VoltraLink::requestMode(int mode){if(!canSwitch(device,now)||!fresh(device,now))return false;device.mode=mode;device.fitnessMode=mode?4:0;return true;}
 }
@@ -343,6 +343,15 @@ int main(){
  lv_obj_send_event(absent,LV_EVENT_CLICKED,nullptr);assert(device.selected==0);
  device.trainers[1].lastSeenMs=now;snapshot("build/preview-trainer-nearby.ppm");assert(!lv_obj_has_state(absent,LV_STATE_DISABLED));
  assert(strcmp(lv_label_get_text(lv_obj_get_child(absent,1)),"Nearby")==0);
+ // Mitigation must block a voice Release before it reaches the link, even
+ // with a loaded, connected trainer. Existing touch assertions above still pass.
+ device.link=vlink::LinkState::Ready;device.selected=0;device.loaded=true;device.fitnessMode=5;
+ const int beforeVoiceStops=unloadCalls,beforeVoiceLoads=loadCalls;
+ assert(!ui::voiceAction({voice::EventKind::Release,now,device.session,device.mode}));
+ assert(unloadCalls==beforeVoiceStops);
+ device.loaded=false;device.fitnessMode=4;
+ assert(!ui::voiceAction({voice::EventKind::Load,now,device.session,device.mode}));
+ assert(loadCalls==beforeVoiceLoads);
  printf("Tap-number load, loaded weight edits, mode menu, session, availability and idle navigation tests passed.\n");
  return 0;
 }
