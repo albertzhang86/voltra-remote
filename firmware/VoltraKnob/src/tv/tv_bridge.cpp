@@ -156,8 +156,10 @@ void publish(const vlink::DeviceState& s,uint32_t now){
  bytes[19]=s.mode<0?255:s.mode;put16(bytes+20,s.fitnessMode<0?65535:s.fitnessMode);
  const bool independent=s.endpoint.independent();
  const auto activeWeight=vlink::activeWeightReading(s,now);
- writeActiveWeight(bytes,activeWeight.tenthsLb);
- put16(bytes+26,fresh&&independent&&s.repMs?s.reps:65535);
+ const auto movingWeight=vlink::movingWeightReading(s,now);
+ if(movingWeight.source==vlink::ActiveWeightSource::CableForce)writeMovingWeight(bytes,movingWeight.tenthsLb);
+ else writeActiveWeight(bytes,activeWeight.tenthsLb);
+ put16(bytes+26,fresh&&independent&&s.repMs?encodedRepCount(s.reps):65535);
  bytes[30]=fresh&&!busy(s,now)&&vlink::twinControlReady(s,now)&&vlink::canSwitch(s,now)&&voltra::fitnessModeUnloaded(s.fitnessMode);
  if(s.selected>=0&&s.selected<2){
    memcpy(bytes+32,s.trainers[s.selected].name,31);memcpy(bytes+64,s.trainers[s.selected].address,17);

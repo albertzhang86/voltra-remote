@@ -158,6 +158,41 @@ int main(){
   CHECK_EQ(reading.activeWeightTenths,-1);CHECK_EQ(reading.forceMs,0u);
   CHECK_EQ(reading.runtimeWeightLbs,-1);CHECK_EQ(reading.runtimeWeightMs,0u);
   CHECK_EQ(vlink::activeWeightReading(reading,1601).tenthsLb,-1);
+  // The display switches to measured force only while a fresh B4 proves motion.
+  // These are presentation gates; target resistance and load controls are unchanged.
+  vlink::DeviceState moving;moving.link=vlink::LinkState::Ready;
+  moving.statusMs=1000;moving.loaded=true;moving.fitnessMode=5;endpoint(moving,1000);
+  voltra::Event motion;motion.type=voltra::EventType::Telemetry;
+  motion.activeWeightTenths=83;motion.hasMotionTelemetry=true;
+  motion.cableLengthMm=500;motion.cableVelocityMmPerSecond=300;
+  for(int mode:{1,2,4,7}){
+    moving.mode=mode;vlink::updateWeightTelemetry(moving,motion,1000);
+    CHECK_EQ(vlink::movingWeightReading(moving,1001).tenthsLb,83);
+    CHECK(vlink::movingWeightReading(moving,1001).source==vlink::ActiveWeightSource::CableForce);
+  }
+  motion.cableVelocityMmPerSecond=-300;vlink::updateWeightTelemetry(moving,motion,1000);
+  CHECK_EQ(vlink::movingWeightReading(moving,1499).tenthsLb,83);
+  CHECK_EQ(vlink::movingWeightReading(moving,1500).tenthsLb,-1);
+  for(int speed:{-9,0,9}){
+    motion.cableVelocityMmPerSecond=speed;vlink::updateWeightTelemetry(moving,motion,1000);
+    CHECK_EQ(vlink::movingWeightReading(moving,1001).tenthsLb,-1); // tension/extension is not movement
+  }
+  motion.cableVelocityMmPerSecond=10;vlink::updateWeightTelemetry(moving,motion,1000);
+  CHECK_EQ(vlink::movingWeightReading(moving,1001).tenthsLb,83);
+  moving.loaded=false;moving.fitnessMode=4;CHECK_EQ(vlink::movingWeightReading(moving,1001).tenthsLb,-1);
+  moving.loaded=true;moving.fitnessMode=21;CHECK_EQ(vlink::movingWeightReading(moving,1001).tenthsLb,83);
+  moving.armed=true;CHECK_EQ(vlink::movingWeightReading(moving,1001).tenthsLb,-1);moving.armed=false;
+  motion.hasMotionTelemetry=false;vlink::updateWeightTelemetry(moving,motion,1001);
+  CHECK_EQ(moving.motionMs,0u);CHECK_EQ(vlink::movingWeightReading(moving,1002).tenthsLb,-1);
+  motion.hasMotionTelemetry=true;vlink::updateWeightTelemetry(moving,motion,1002);
+  endpoint(moving,1000,true);CHECK_EQ(vlink::movingWeightReading(moving,1003).tenthsLb,-1);
+  endpoint(moving,1000);moving.twinPending=true;CHECK_EQ(vlink::movingWeightReading(moving,1003).tenthsLb,-1);moving.twinPending=false;
+  moving.mode=8;CHECK_EQ(vlink::movingWeightReading(moving,1003).tenthsLb,-1);moving.mode=1;
+  moving.statusMs=1;CHECK_EQ(vlink::movingWeightReading(moving,3501).tenthsLb,-1);moving.statusMs=1000;
+  moving.link=vlink::LinkState::Scanning;CHECK_EQ(vlink::movingWeightReading(moving,1003).tenthsLb,-1);
+  moving.link=vlink::LinkState::Ready;vlink::clearWeightTelemetry(moving);
+  CHECK_EQ(moving.motionMs,0u);CHECK_EQ(moving.cableLengthMm,-1);
+  CHECK_EQ(vlink::movingWeightReading(moving,1003).tenthsLb,-1);
   // Discovery is separate from both saved slots, deduplicated, and bounded.
   vlink::DeviceState discovered;strcpy(discovered.trainers[0].address,"saved-left");strcpy(discovered.trainers[1].address,"saved-right");
   CHECK_EQ(vlink::nearbySlot(discovered,"new-trainer",1000),0);

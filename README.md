@@ -128,7 +128,23 @@ or start training. Bridge v2 supports Create/Exit Twin with verified roles and b
 batteries; its pair/exit request requires idle mode. Twin live force/reps are withheld
 until validated from hardware, rather than doubling a single cable reading.
 Expired commands or commands for an old trainer/TV connection are rejected.
-Independent active weight uses the trainer's reported target resistance while
+The primary number shows the configured setting at rest, including loaded without
+cable movement. Fresh independent B4 force replaces it during loaded movement;
+stopping or losing fresh motion returns to the setting. Explicitly unloaded state
+dims the configured number and adds a dot in all four modes. Damper uses Factor
+at rest; Isokinetic uses speed in m/s. Editing and modifier pages keep their own
+values. Measured force uses SI kg conversion to one decimal; settings retain the
+trainer's observed half-kg display grid.
+
+Movement requires force and signed cable velocity from the same B4 sample, at
+least 10 mm/s in either direction, less than 500 ms old. The common independent
+B4 fields are force at payload +0 (u16, tenths lb), cable length at +2 (u16, mm),
+and velocity at +4 (i16, mm/s), as decoded by Cortex. Residual cable tension or
+absolute cable extension alone never proves movement. Session/load/mode/topology
+changes and legacy force-only packets clear motion evidence. Native Twin motion
+is not inferred from one trainer.
+
+Separately, independent target resistance uses the trainer's reported target while
 loaded, and zero only when fresh fitness state 4 explicitly reports unloaded.
 Unknown/armed load states, stale or missing target readings, unsupported modes,
 and Twin topology report unavailable. Target readings expire after two seconds
@@ -137,7 +153,11 @@ measured cable tension, the runtime wire-weight register (`0x3e83`, signed whole
 lb), nor configured set weight (`0x3e86`) substitutes for a missing target.
 Measured force and four-per-second runtime queries remain separate diagnostics.
 Bridge v2 byte 133 bit 6 identifies target resistance (or explicitly unloaded zero)
-at byte 22 in tenths of a pound. Legacy bit 4 is no longer emitted for active weight.
+at byte 22 in tenths of a pound. Bit 7 instead identifies fresh measured force
+during confirmed loaded movement; bits 4, 6 and 7 are mutually exclusive. Moving
+force takes priority at offset 22; target resistance is sent otherwise. Packet
+length is unchanged, so older readers treat bit-7 values as measured force rather
+than target resistance. Legacy bit 4 is no longer emitted.
 
 The runtime register's readback and whole-lb field agree with a physical unloaded
 capture (1 lb while the base setting was 6 lb). Moving-cable validation is pending.

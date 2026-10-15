@@ -163,6 +163,47 @@ int main(){
  assert(!lv_obj_has_state(follower,LV_STATE_DISABLED));
  assert(lv_obj_has_flag(lv_obj_get_child(lv_screen_active(),7),LV_OBJ_FLAG_HIDDEN));
  assert(strcmp(lv_label_get_text(weightNumber),"27.5")==0);
+ // Primary readouts keep configured settings at rest, show fresh cable force
+ // during movement, and return to mode-specific settings when movement stops.
+ const auto readoutBaseline=device;
+ auto* readoutUnit=lv_obj_get_child(lv_screen_active(),6);
+ auto* unloadedIndicator=lv_obj_get_child(lv_screen_active(),5);
+ for(int mode:{1,2,4,7}){
+   device.mode=mode;device.weightLbs=8;device.weightUnitRaw=1;device.settingsMs=now;
+   device.modeValues[0]=22;device.modeValues[1]=100;device.modeValues[5]=4;device.modeValues[7]=500;
+   device.modeValues[8]=0;device.modeValues[9]=0;device.modeValues[10]=5;device.modeValues[11]=5;
+   for(auto& stamp:device.modeValueMs)stamp=now;
+   device.loaded=false;device.fitnessMode=4;device.forceMs=device.motionMs=0;
+   char file[100];snprintf(file,sizeof(file),"build/preview-readout-%d-unloaded.ppm",mode);snapshot(file);
+   const char* configured=mode==1?"3.5":mode==2?"10.0":mode==4?"17":"0.5";
+   const char* configuredUnit=mode==1?"kg":mode==2?"Max kg":mode==4?"Factor":"m/s";
+   assert(!strcmp(lv_label_get_text(weightNumber),configured));
+   assert(!strcmp(lv_label_get_text(readoutUnit),configuredUnit));
+   assert(!lv_obj_has_flag(unloadedIndicator,LV_OBJ_FLAG_HIDDEN));
+   if(mode!=2)assert(lv_obj_get_style_text_opa(weightNumber,0)==LV_OPA_50);
+   device.loaded=true;device.fitnessMode=5;
+   snprintf(file,sizeof(file),"build/preview-readout-%d-rest.ppm",mode);snapshot(file);
+   assert(!strcmp(lv_label_get_text(weightNumber),configured));
+   assert(lv_obj_has_flag(unloadedIndicator,LV_OBJ_FLAG_HIDDEN));
+   device.activeWeightTenths=120;device.forceMs=device.motionMs=now;
+   device.cableLengthMm=300;device.cableVelocityMmPerSecond=100;
+   snprintf(file,sizeof(file),"build/preview-readout-%d-live.ppm",mode);snapshot(file);
+   assert(!strcmp(lv_label_get_text(weightNumber),"5.4"));
+   assert(!strcmp(lv_label_get_text(readoutUnit),"kg"));
+   const int liveFlushes=flushCalls;snapshot("build/readout-live-steady.ppm");assert(flushCalls==liveFlushes);
+   device.cableVelocityMmPerSecond=0;device.forceMs=device.motionMs=now;
+   snprintf(file,sizeof(file),"build/preview-readout-%d-stationary.ppm",mode);snapshot(file);
+   assert(!strcmp(lv_label_get_text(weightNumber),configured));
+   assert(!strcmp(lv_label_get_text(readoutUnit),configuredUnit));
+   device.cableVelocityMmPerSecond=-100;device.forceMs=device.motionMs=now;
+   snapshot("build/readout-eccentric.ppm");assert(!strcmp(lv_label_get_text(weightNumber),"5.4"));
+   now+=2100;for(auto& stamp:device.modeValueMs)stamp=now;
+   snprintf(file,sizeof(file),"build/preview-readout-%d-restored.ppm",mode);snapshot(file);
+   assert(!strcmp(lv_label_get_text(weightNumber),configured));
+   assert(!strcmp(lv_label_get_text(readoutUnit),configuredUnit));
+ }
+ device=readoutBaseline;++device.session;device.settingsMs=now;
+ snapshot("build/readout-baseline-restored.ppm");
  // A single tap loads once; a long press alone does not load until release/click.
  auto* action=lv_obj_get_child(lv_screen_active(),4);
  device.settingsMs=now;device.statusMs=now;

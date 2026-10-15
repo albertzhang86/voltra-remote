@@ -14,6 +14,9 @@ fi
 $CXX test/test_remote.cpp $SRC/protocol/voltra_protocol.cpp -o build/host/test_remote
 build/host/test_remote
 
+$CXX test/test_training_readout.cpp -o build/host/test_training_readout
+build/host/test_training_readout
+
 $CXX test/test_direction_filter.cpp -o build/host/test_direction_filter
 build/host/test_direction_filter
 

@@ -126,6 +126,7 @@ static void testDecode() {
   }){
     n=fromHex(captured.first,b,sizeof(b));CHECK(validFrame(b,n));e=decode(b,n);
     CHECK(e.type==EventType::Telemetry);CHECK_EQ(e.activeWeightTenths,captured.second);
+    CHECK(e.hasMotionTelemetry);CHECK_EQ(e.cableLengthMm,3);CHECK_EQ(e.cableVelocityMmPerSecond,0);
     CHECK(e.hasTargetForceReport);CHECK_EQ(e.targetForceTenths,60);
     CHECK_EQ(e.weightLbs,-1);CHECK_EQ(e.mode,-1);CHECK_EQ(e.fitnessMode,-1);
   }
@@ -134,6 +135,9 @@ static void testDecode() {
     for(size_t length:{base,base+2}){
       n=synth(b,length,"551304",{{8,source},{10,0xb4},{11,0},{12,0}});
       e=decode(b,n);CHECK_EQ(e.activeWeightTenths,0); // zero is a measurement
+      b[13]=0x34;b[14]=0x12;b[15]=0x2c;b[16]=1;e=decode(b,n);
+      CHECK(e.hasMotionTelemetry);CHECK_EQ(e.cableLengthMm,0x1234);CHECK_EQ(e.cableVelocityMmPerSecond,300);
+      b[15]=0xd4;b[16]=0xfe;e=decode(b,n);CHECK_EQ(e.cableVelocityMmPerSecond,-300);
       CHECK(e.hasTargetForceReport);CHECK_EQ(e.targetForceTenths,length==base?-1:0);
       if(length==base+2){
         b[base-2]=0x7b;b[base-1]=1;e=decode(b,n);CHECK_EQ(e.targetForceTenths,379);
@@ -150,18 +154,38 @@ static void testDecode() {
   }
   // Another packet family with the same 58-byte envelope is not cable force.
   n=synth(b,58,"553a0470",{{10,7},{22,60}});e=decode(b,n);CHECK_EQ(e.activeWeightTenths,-1);
-  // Vendor per-rep: 74 bytes, aa 82 3b at 10..12, setCounter at 15, repCount at 17.
-  n = synth(b, 74, "554a04", {{10,0xaa},{11,0x82},{12,0x3b},{15,2},{17,7}});
-  e = decode(b, n); CHECK(e.type == EventType::PerRep); CHECK_EQ(e.repCount, 7); CHECK_EQ(e.setCounter, 2);
-  b[16]=1;b[18]=1;e=decode(b,n);CHECK_EQ(e.repCount,263);CHECK_EQ(e.setCounter,258);
+  // Pull carries the prior count; return already includes the current rep.
+  n = synth(b, 74, "554a04", {{10,0xaa},{11,0x82},{12,0x3b},{13,1},{15,2},{17,7}});
+  e = decode(b, n); CHECK(e.type == EventType::PerRep); CHECK_EQ(e.repCount, 8); CHECK_EQ(e.setCounter, 2);
+  b[16]=1;b[18]=1;e=decode(b,n);CHECK_EQ(e.repCount,264);CHECK_EQ(e.setCounter,258);
+  for(int phase:{1,2})for(int index:{0,3,65533,65534,65535}){
+    b[13]=phase;b[17]=index&255;b[18]=index>>8;
+    e=decode(b,n);CHECK(e.type==EventType::PerRep);CHECK_EQ(e.repCount,index+(phase==1?1:0));
+  }
+  for(int completed:{1,2,8}){
+    b[13]=1;b[17]=completed-1;b[18]=0;e=decode(b,n);CHECK_EQ(e.repCount,completed);
+    b[13]=2;b[17]=completed;e=decode(b,n);CHECK_EQ(e.repCount,completed);
+  }
+  for(int phase:{0,3,255}){
+    b[13]=phase;e=decode(b,n);CHECK(e.type==EventType::Unknown);CHECK_EQ(e.repCount,-1);
+  }
+
+  // Same-set real captures from HJewkes/voltra-node-sdk vendor-decoders.test.ts:
+  // first pull index 0 at 50 lb, followed by a final summary total of 1.
+  n=fromHex("554a04c610aa4a072000aa823b011a03000000f4010000000000005203810282038102cb00000075000000f40100004a060000010000520375000000bc0000004a060000000000006f1f",b,sizeof(b));
+  CHECK(validFrame(b,n));e=decode(b,n);CHECK_EQ(e.setCounter,3);CHECK_EQ(e.repCount,1);
+  n=fromHex("556e043c10aa8b072000aa855f010203f40100000000000003000100f9018203cb000000f501110275000000f8017b0156000000f50120013f00000052030000e8030000f40100004d170000d6ac0400bc000000b8000000bd000000b90000004a060000000000006d0b000034a5",b,sizeof(b));
+  CHECK(validFrame(b,n));e=decode(b,n);CHECK(e.type==EventType::SetSummary);CHECK_EQ(e.repCount,1);
 
   // Vendor set summary: 110 bytes, aa 85 5f, repCount u16 at 26.
   n = synth(b, 110, "556e04", {{10,0xaa},{11,0x85},{12,0x5f},{26,12},{27,0}});
   e = decode(b, n); CHECK(e.type == EventType::SetSummary); CHECK_EQ(e.repCount, 12);
+  b[26]=8;e=decode(b,n);CHECK_EQ(e.repCount,8); // Captured eight-rep set stays eight.
 
   // Vendor summary: 140 bytes, aa 86 7d, repCount u16 at 16.
   n = synth(b, 140, "558c04", {{10,0xaa},{11,0x86},{12,0x7d},{16,9},{17,0}});
   e = decode(b, n); CHECK(e.type == EventType::SetSummary); CHECK_EQ(e.repCount, 9);
+  b[16]=1;b[17]=0;e=decode(b,n);CHECK_EQ(e.repCount,1); // Already a count, not an index.
 
   // Settings with fitness mode 893e = 5 (motor engaged) alongside the weight.
   n = synth(b, 46, "552e04", {{10,0x10},{11,2},{13,0x86},{14,0x3e},{15,0x0a},{16,0x00},{17,0x89},{18,0x3e},{19,0x05},{20,0x00}});

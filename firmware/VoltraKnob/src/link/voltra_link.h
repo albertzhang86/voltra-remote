@@ -39,6 +39,8 @@ struct DeviceState {
   int mode=-1, fitnessMode=-1, battery=-1, reps=0;
   int activeWeightTenths=-1;
   uint32_t forceMs=0,repMs=0;
+  int cableLengthMm=-1,cableVelocityMmPerSecond=0;
+  uint32_t motionMs=0;
   int targetForceTenths=-1;
   uint32_t targetForceMs=0;
   int runtimeWeightLbs=-1;
@@ -59,7 +61,7 @@ inline bool fresh(const DeviceState& s,uint32_t now) {
 inline bool endpointFresh(const DeviceState& s,uint32_t now){return s.endpointMs&&now-s.endpointMs<3500&&s.endpoint.known();}
 // Measured tension remains diagnostic data. The dashboard uses only device
 // target resistance, or zero when the device explicitly reports unloaded.
-enum class ActiveWeightSource:uint8_t {Unavailable,TargetForce,Unloaded};
+enum class ActiveWeightSource:uint8_t {Unavailable,TargetForce,Unloaded,CableForce};
 struct ActiveWeightReading {int tenthsLb=-1;ActiveWeightSource source=ActiveWeightSource::Unavailable;};
 inline ActiveWeightReading activeWeightReading(const DeviceState& s,uint32_t now){
  if(!fresh(s,now)||!endpointFresh(s,now)||s.twinPending||!s.endpoint.independent()||!voltra::supportedMode(s.mode))return {};
@@ -69,8 +71,20 @@ inline ActiveWeightReading activeWeightReading(const DeviceState& s,uint32_t now
    return {s.targetForceTenths,ActiveWeightSource::TargetForce};
  return {};
 }
+// Display measured force only with contemporaneous movement. A stationary
+// cable can retain tension, so neither force > 0 nor an extended cable proves
+// movement. 10 mm/s rejects near-zero speed jitter; freshness is bounded to 0.5 s.
+inline ActiveWeightReading movingWeightReading(const DeviceState& s,uint32_t now){
+ if(!fresh(s,now)||!endpointFresh(s,now)||s.twinPending||!s.endpoint.independent()||!voltra::supportedMode(s.mode))return {};
+ if(!s.loaded||s.armed||!voltra::fitnessModeLoaded(s.fitnessMode))return {};
+ if(!s.motionMs||s.motionMs!=s.forceMs||now-s.motionMs>=500)return {};
+ if(s.cableVelocityMmPerSecond>-10&&s.cableVelocityMmPerSecond<10)return {};
+ if(s.activeWeightTenths<0||s.activeWeightTenths>10000)return {};
+ return {s.activeWeightTenths,ActiveWeightSource::CableForce};
+}
 inline void clearWeightTelemetry(DeviceState& s){
  s.activeWeightTenths=-1;s.forceMs=0;
+ s.cableLengthMm=-1;s.cableVelocityMmPerSecond=0;s.motionMs=0;
  s.targetForceTenths=-1;s.targetForceMs=0;
  s.runtimeWeightLbs=-1;s.runtimeWeightMs=0;
 }
@@ -79,6 +93,10 @@ inline void updateWeightTelemetry(DeviceState& s,const voltra::Event& e,uint32_t
  if(e.type==voltra::EventType::Telemetry){
    const bool valid=e.activeWeightTenths>=0&&e.activeWeightTenths<=10000;
    s.activeWeightTenths=valid?e.activeWeightTenths:-1;s.forceMs=valid?now:0;
+   // A force-only legacy frame cannot borrow movement from a previous B4.
+   s.motionMs=valid&&e.hasMotionTelemetry?now:0;
+   s.cableLengthMm=s.motionMs?e.cableLengthMm:-1;
+   s.cableVelocityMmPerSecond=s.motionMs?e.cableVelocityMmPerSecond:0;
  }
  if(e.hasTargetForceReport){
    const bool valid=e.targetForceTenths>=0&&e.targetForceTenths<=10000;

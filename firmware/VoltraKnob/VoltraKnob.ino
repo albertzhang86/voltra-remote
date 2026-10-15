@@ -26,6 +26,16 @@ void loop(){
  uiMaxUs=std::max(uiMaxUs,uint32_t(micros()-uiStart));
  const uint32_t renderStart=micros();lv_timer_handler();
  renderMaxUs=std::max(renderMaxUs,uint32_t(micros()-renderStart));
+ // Bounded, read-only diagnostics for comparing the main readout with the TV.
+ // Keep USB logging out of the BLE notification callback.
+ static uint32_t lastWeightLog=0,lastMotionSample=0;
+ if(now-lastWeightLog>=250&&Serial.availableForWrite()>=180){
+   lastWeightLog=now;const auto s=vlink::voltraLink.state();
+   if(s.motionMs&&s.motionMs!=lastMotionSample){
+     lastMotionSample=s.motionMs;const auto moving=vlink::movingWeightReading(s,now);
+     Serial.printf("[moving-weight] mode=%d fitness=%d forceTenthsLb=%d cableMm=%d velocityMmS=%d sampleAgeMs=%lu displayedTenthsLb=%d\n",s.mode,s.fitnessMode,s.activeWeightTenths,s.cableLengthMm,s.cableVelocityMmPerSecond,static_cast<unsigned long>(now-s.motionMs),moving.tenthsLb);
+   }
+ }
  static uint32_t lastLog=0;
  if(millis()-lastLog>=5000 && Serial.availableForWrite()>=700){
    lastLog=millis();Serial.printf("[loop] count=%lu maxGapMs=%lu windowGapMs=%lu slowLoops=%lu uiMaxUs=%lu renderMaxUs=%lu\n",(unsigned long)loops,(unsigned long)maxLoopGap,(unsigned long)windowGap,(unsigned long)slowLoops,(unsigned long)uiMaxUs,(unsigned long)renderMaxUs);windowGap=uiMaxUs=renderMaxUs=slowLoops=0;board::logInputs();voice::logStatus();Serial.printf("[ui] selecting=%d\n",ui::selectingTrainer());const auto s=vlink::voltraLink.state();

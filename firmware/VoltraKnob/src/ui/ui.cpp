@@ -10,6 +10,7 @@
 #include "../board/board.h"
 #include "../link/voltra_link.h"
 #include "../app/remote_model.h"
+#include "../app/training_readout.h"
 #include "../tv/tv_bridge.h"
 LV_IMAGE_DECLARE(polar_bear_logo);
 namespace ui {
@@ -513,7 +514,7 @@ void loop(){
  if(bandSessionMode!=s.mode){bandSessionMode=s.mode;bandEdit.reset();damperEdit.reset();resetIso();}
  if(live&&s.mode==2&&s.modeValueMs[0]&&now-s.modeValueMs[0]<8000)bandEdit.observe(s.modeValues[0]);
  if(choosingMode&&(s.loaded||s.armed||loadSentMs))closeModes();
- const bool mappedState=mappedMode(s.mode)&&(s.fitnessMode==4||s.fitnessMode==5||s.armed);
+ const bool mappedState=mappedMode(s.mode)&&(s.fitnessMode==4||voltra::fitnessModeLoaded(s.fitnessMode)||s.armed);
  if(fallbackModeMenu&&live&&mappedState)closeModes();
  if(!choosing&&!splashActive&&live&&!mappedState&&!choosingCable&&!choosingMode){openModes(true);fallbackModeMenu=choosingMode;}
  const int shownMode=live?s.mode:0;if(displayedMode!=shownMode){displayedMode=shownMode;lv_obj_invalidate(currentModeIcon);}
@@ -641,9 +642,18 @@ void loop(){
  setText(status,state);setTextColor(status,color(live&&(s.loaded||s.armed)?accent:theme::Muted),0);
  const bool band=live&&s.mode==2,damper=live&&s.mode==4,iso=live&&s.mode==7;
  auto& edit=edits[page];
+ // Settings stay visible at rest and while editing. Only fresh moving-cable force
+ // replaces the primary readout; modifier pages keep their own value and units.
+ const bool primaryPage=band||damper||(iso?isoPage==0:page==0);
+ const auto readout=remote::trainingReadout(s,now,primaryPage,pending()||loadSentMs);
+ const bool readoutPounds=s.mode!=1&&s.weightUnitRaw==0;
+ const char* readoutUnit=readoutPounds?"lbs":"kg";
+ auto formatLiveWeight=[&]{snprintf(text,sizeof(text),"%.1f",readoutPounds?
+   readout.forceTenthsLb/10.0:remote::telemetryKilograms(readout.forceTenthsLb));};
  bool numberChanged=false;
  if(!band&&!damper&&!iso){
- if(!live||!edit.known||s.mode!=1||(s.twinConnection==2&&!vlink::twinActive(s,now)))snprintf(text,sizeof(text),"--");else snprintf(text,sizeof(text),"%.1f",remote::displayWeightKilograms(edit.target,vlink::twinActive(s,now)));
+ if(readout.liveWeight)formatLiveWeight();
+ else if(!live||!edit.known||s.mode!=1||(s.twinConnection==2&&!vlink::twinActive(s,now)))snprintf(text,sizeof(text),"--");else snprintf(text,sizeof(text),"%.1f",remote::displayWeightKilograms(edit.target,vlink::twinActive(s,now)));
  const bool dialing=dialPulseMs&&now-dialPulseMs<500;
  const auto* numberFont=dialing?&font_inter_80:&font_inter_72;
  numberChanged=strcmp(lv_label_get_text(number),text)||lv_obj_get_style_text_font(number,0)!=numberFont;
@@ -676,9 +686,6 @@ void loop(){
  if(twinInk!=nextTwinInk){twinInk=nextTwinInk;lv_obj_invalidate(twinIcon);}
  if(!band){setTextColor(number,color(accent),0);
  setTextOpacity(number,stopping?LV_OPA_COVER:LV_OPA_50,0);}
- const bool showDot=page==0&&live&&s.mode==1&&!stopping;
- if(showDot){const bool dotMoved=numberChanged||lv_obj_has_flag(unloadedDot,LV_OBJ_FLAG_HIDDEN);if(lv_obj_has_flag(unloadedDot,LV_OBJ_FLAG_HIDDEN))lv_obj_remove_flag(unloadedDot,LV_OBJ_FLAG_HIDDEN);if(dotMoved){lv_obj_update_layout(number);lv_obj_align_to(unloadedDot,number,LV_ALIGN_OUT_RIGHT_MID,8,0);}setBgColor(unloadedDot,color(accent),0);setBgOpacity(unloadedDot,LV_OPA_50,0);}
- else lv_obj_add_flag(unloadedDot,LV_OBJ_FLAG_HIDDEN);
  if(s.parameterSelectionPending)snprintf(text,sizeof(text),"Reading setting from Voltra...");
  else if(edit.timedOut)snprintf(text,sizeof(text),"Not confirmed - try again");
  else if(pending())snprintf(text,sizeof(text),"Waiting for trainer confirmation");
@@ -702,41 +709,54 @@ void loop(){
    if(!band){lv_obj_align(unit,LV_ALIGN_TOP_MID,showTwin?-15:0,damper?222:181);lv_obj_align(number,damper?LV_ALIGN_CENTER:LV_ALIGN_TOP_MID,0,damper?0:106);}
    else{lv_obj_align(number,LV_ALIGN_TOP_MID,0,94);lv_obj_align(unit,LV_ALIGN_TOP_MID,showTwin?-15:0,190);}
  }
- setHidden(bandDetails,!band);setHidden(damperRoman,!damper);for(auto* tab:tabs)setHidden(tab,band||damper);
+ setHidden(bandDetails,!band);setHidden(damperRoman,!damper||readout.liveWeight);for(auto* tab:tabs)setHidden(tab,band||damper);
  if(band){
    const bool known=s.modeValueMs[0]&&now-s.modeValueMs[0]<8000&&(s.weightUnitRaw==0||s.weightUnitRaw==1);
-   if(!known)snprintf(text,sizeof(text),"--");
+   if(readout.liveWeight)formatLiveWeight();
+   else if(!known)snprintf(text,sizeof(text),"--");
    else if(s.weightUnitRaw==1)snprintf(text,sizeof(text),"%.1f",remote::displayWeightKilograms(bandEdit.target,false));
    else snprintf(text,sizeof(text),"%d",bandEdit.target);
    setFont(number,dialPulseMs&&now-dialPulseMs<500?&font_inter_54:&font_inter_48,0);setText(number,text);
    setBgColor(number,color(accent),0);setBgOpacity(number,stopping?LV_OPA_COVER:LV_OPA_50,0);
    setTextColor(number,color(theme::Background),0);setTextOpacity(number,LV_OPA_COVER,0);
-   setText(unit,s.weightUnitRaw==1?"Max kg":s.weightUnitRaw==0?"Max lbs":"Max");setTextColor(unit,color(theme::Background),0);
-   setHidden(unloadedDot,true);
+   setText(unit,readout.liveWeight?readoutUnit:s.weightUnitRaw==1?"Max kg":s.weightUnitRaw==0?"Max lbs":"Max");setTextColor(unit,color(theme::Background),0);
    if(s.modeValueMs[1]&&now-s.modeValueMs[1]<8000&&s.lengthUnitRaw==0)snprintf(text,sizeof(text),"Band length: %d cm\nSettings read from Voltra",s.modeValues[1]);
    else if(s.modeValueMs[1]&&now-s.modeValueMs[1]<8000&&s.lengthUnitRaw==1)snprintf(text,sizeof(text),"Band length: %.1f in\nSettings read from Voltra",s.modeValues[1]/2.54);
    else snprintf(text,sizeof(text),"Reading Band settings...");
-   setText(bandDetails,text);setText(details,bandEdit.timedOut?"Not confirmed - try again":bandEdit.pending?"Waiting for Voltra":vlink::selectedFollower(s,now)?"Select the Twin controller":stopping?"Tap maximum to unload":loadReady?"Turn to adjust · Tap to load":"Reading settings...");
+   setText(bandDetails,text);setText(details,bandEdit.timedOut?"Not confirmed - try again":bandEdit.pending?"Waiting for Voltra":vlink::selectedFollower(s,now)?"Select the Twin controller":stopping?(readout.liveWeight?"Tap weight to unload":"Tap maximum to unload"):loadReady?"Turn to adjust · Tap to load":"Reading settings...");
  }else if(damper){
    const bool known=s.modeValueMs[5]&&now-s.modeValueMs[5]<5000&&s.modeValues[5]>=0&&s.modeValues[5]<=9;
-   if(known)snprintf(text,sizeof(text),"%d",remote::damperFactor(damperEdit.target));else snprintf(text,sizeof(text),"--");
+   if(readout.liveWeight)formatLiveWeight();
+   else if(known)snprintf(text,sizeof(text),"%d",remote::damperFactor(damperEdit.target));else snprintf(text,sizeof(text),"--");
    setText(number,text);setFont(number,dialPulseMs&&now-dialPulseMs<500?&font_inter_80:&font_inter_72,0);
-   setText(unit,"Factor");setTextColor(unit,color(theme::Muted),0);setBgOpacity(number,LV_OPA_TRANSP,0);
+   setText(unit,readout.liveWeight?readoutUnit:"Factor");setTextColor(unit,color(theme::Muted),0);setBgOpacity(number,LV_OPA_TRANSP,0);
    setText(damperRoman,known?remote::damperRoman(damperEdit.target):"--");setTextColor(damperRoman,color(accent),0);setTextOpacity(damperRoman,stopping?LV_OPA_COVER:LV_OPA_50,0);
-   setText(details,damperEdit.timedOut?"Not confirmed - try again":damperEdit.pending?"Waiting for Voltra":stopping?"Tap factor to unload":loadReady?"Turn to adjust · Tap to load":"Reading settings...");
+   setText(details,damperEdit.timedOut?"Not confirmed - try again":damperEdit.pending?"Waiting for Voltra":stopping?(readout.liveWeight?"Tap weight to unload":"Tap factor to unload"):loadReady?"Turn to adjust · Tap to load":"Reading settings...");
  }else if(iso){
    const int index=isoIndex(s,isoPage);const auto& active=isoEdits[index-7];
-   isoText(text,sizeof(text),s,index,active,now);
-   const bool autoSpeed=index==9&&active.known&&active.target==0;
+   if(readout.liveWeight)formatLiveWeight();else isoText(text,sizeof(text),s,index,active,now);
+   const bool autoSpeed=!readout.liveWeight&&index==9&&active.known&&active.target==0;
    if(autoSpeed)text[0]=0;setText(number,text);
    setFont(number,index==8?&font_inter_20:dialPulseMs&&now-dialPulseMs<500?&font_inter_80:&font_inter_72,0);
    setBgOpacity(number,LV_OPA_TRANSP,0);setTextColor(unit,color(theme::Muted),0);
-   setText(unit,index==8||autoSpeed?"":index==7||index==9?"m/s":s.weightUnitRaw==1?"kg":s.weightUnitRaw==0?"lbs":"");
+   setText(unit,readout.liveWeight?readoutUnit:index==8||autoSpeed?"":index==7||index==9?"m/s":s.weightUnitRaw==1?"kg":s.weightUnitRaw==0?"lbs":"");
    const char* labels[]={"Speed","Return","Ecc.","Limit"};
    for(int i=0;i<4;++i){const int param=isoIndex(s,i);setText(isoLabels[i],labels[i]);setBgColor(tabs[i],color(i==isoPage?theme::Selected:theme::Surface),0);setTextColor(isoLabels[i],color(i==isoPage?accent:theme::Text),0);setTextColor(tabValues[i],color(i==isoPage?accent:theme::Text),0);isoText(text,sizeof(text),s,param,isoEdits[param-7],now);setText(tabValues[i],text);setFont(tabValues[i],param==8?&font_inter_12:&font_inter_16,0);}
-   setText(details,active.timedOut?"Not confirmed - try again":pending()?"Waiting for Voltra":stopping?(isoPage==0?"Tap speed to unload":"Unload to edit settings"):isoPage==0?"Turn to adjust · Tap to load":isoPage==1?"Eccentric return type":isoPage==2?(index==9?"Eccentric speed · 0 = Auto":"Eccentric resistance"):"Maximum eccentric load");
+   setText(details,active.timedOut?"Not confirmed - try again":pending()?"Waiting for Voltra":stopping?(isoPage==0?(readout.liveWeight?"Tap weight to unload":"Tap speed to unload"):"Unload to edit settings"):isoPage==0?"Turn to adjust · Tap to load":isoPage==1?"Eccentric return type":isoPage==2?(index==9?"Eccentric speed · 0 = Auto":"Eccentric resistance"):"Maximum eccentric load");
  }else{setBgOpacity(number,LV_OPA_TRANSP,0);setTextColor(unit,color(theme::Muted),0);}
  for(int i=0;i<4;++i){setHidden(isoLabels[i],!iso);if(!iso)setFont(tabValues[i],&font_inter_16,0);}
+
+ // Unloaded is an explicit trainer state, not missing telemetry. Keep the
+ // configured number, dim it, and place the same indicator beside every mode.
+ static int lastDotX=0,lastDotY=0;
+ if(readout.unloaded&&strcmp(lv_label_get_text(number),"--")&&lv_label_get_text(number)[0]){
+   lv_obj_update_layout(number);lv_area_t bounds;lv_obj_get_coords(number,&bounds);
+   const int x=bounds.x2+8,y=(bounds.y1+bounds.y2)/2;
+   if(lv_obj_has_flag(unloadedDot,LV_OBJ_FLAG_HIDDEN)||x!=lastDotX||y!=lastDotY){
+     lv_obj_align_to(unloadedDot,number,LV_ALIGN_OUT_RIGHT_MID,8,0);lastDotX=x;lastDotY=y;
+   }
+   setHidden(unloadedDot,false);setBgColor(unloadedDot,color(accent),0);setBgOpacity(unloadedDot,LV_OPA_50,0);
+ }else setHidden(unloadedDot,true);
 
  if(repaintView){lv_obj_invalidate(screen);repaintView=false;}
 }

@@ -24,12 +24,22 @@ int main(){
  assert(weightUnitFlags(1,0)==8);assert(weightUnitFlags(1,-1)==8);
  assert(weightUnitFlags(2,0)==4);assert(weightUnitFlags(2,1)==8);
  assert(weightUnitFlags(7,-1)==0);assert(weightUnitFlags(7,2)==0);
+ assert(encodedRepCount(-1)==65535);assert(encodedRepCount(0)==0);
+ assert(encodedRepCount(1)==1);assert(encodedRepCount(65534)==65534);
+ assert(encodedRepCount(65535)==65535);assert(encodedRepCount(65536)==65535);
+ uint8_t repBytes[2];put16(repBytes,encodedRepCount(65536));assert(u16(repBytes)==65535);
  uint8_t snapshot[SNAPSHOT_BASE]{};snapshot[133]=USB_POWER_FLAG|RUNTIME_WEIGHT_FLAG|8;
  writeActiveWeight(snapshot,60);assert(u32(snapshot+22)==60);
  assert(snapshot[133]==(USB_POWER_FLAG|TARGET_FORCE_FLAG|8));
  writeActiveWeight(snapshot,0);assert(u32(snapshot+22)==0);assert(snapshot[133]&TARGET_FORCE_FLAG);
  writeActiveWeight(snapshot,-1);assert(u32(snapshot+22)==0xffffffff);
  assert(snapshot[133]==(USB_POWER_FLAG|8)); // missing target has no fallback marker
+ writeMovingWeight(snapshot,83);assert(u32(snapshot+22)==83);
+ assert(snapshot[133]==(USB_POWER_FLAG|MOVING_FORCE_FLAG|8));
+ writeActiveWeight(snapshot,60);assert(snapshot[133]==(USB_POWER_FLAG|TARGET_FORCE_FLAG|8));
+ writeMovingWeight(snapshot,0);assert(u32(snapshot+22)==0);assert(snapshot[133]&MOVING_FORCE_FLAG);
+ writeMovingWeight(snapshot,-1);assert(u32(snapshot+22)==0xffffffff);
+ assert(snapshot[133]==(USB_POWER_FLAG|8));
  uint8_t bytes[24]={MAGIC,VERSION,3,0};put32(bytes+4,123);put32(bytes+8,7);put32(bytes+12,3000);
  put16(bytes+16,1);put16(bytes+18,0x3e86);put32(bytes+20,35);
  Command c;assert(decode(bytes,sizeof(bytes),c));assert(c.value==35&&c.field==0x3e86);

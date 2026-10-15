@@ -73,12 +73,15 @@ struct Event {
   int guidedCtrl = -1;        // Settings: 53c9 register
   int battery = -1;     // Battery, 0..100
   int activeWeightTenths = -1; // Live cable force in tenths of a pound; never set weight.
+  bool hasMotionTelemetry = false; // Force, cable length and velocity from the same B4 sample.
+  int cableLengthMm = -1;
+  int cableVelocityMmPerSecond = 0;
   bool hasTargetForceReport = false; // B4 report, including an absent/invalid target.
   int targetForceTenths = -1; // Device target resistance, independent of measured cable force.
   bool hasRuntimeWeight = false;
   int runtimeWeightLbs = 0; // Signed whole-lb device runtime register 0x3e83.
   int phase = -1;       // Telemetry: 0 idle, 1 concentric, 2 hold, 3 eccentric
-  int repCount = -1;    // PerRep, SetSummary
+  int repCount = -1;    // Pull index + 1; return and SetSummary totals unchanged.
   int setCounter = -1;  // PerRep
 };
 

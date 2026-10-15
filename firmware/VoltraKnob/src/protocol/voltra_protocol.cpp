@@ -220,6 +220,11 @@ Event decode(const uint8_t* d, size_t n) {
     const size_t baseSize=source==0?6:10;
     if(d[0]==0x55&&d[2]==0x04&&source<=2&&(payloadSize==baseSize||payloadSize==baseSize+2)){
       e.type=EventType::Telemetry;e.activeWeightTenths=u16le(d,11);
+      // Cortex's independent B4 contract: force u16, cable length u16,
+      // signed cable velocity i16. Both pull and return count as movement.
+      e.hasMotionTelemetry=true;e.cableLengthMm=u16le(d,13);
+      const int velocity=u16le(d,15);
+      e.cableVelocityMmPerSecond=velocity>=0x8000?velocity-0x10000:velocity;
       e.hasTargetForceReport=true;
       if(payloadSize==baseSize+2){
         const int target=u16le(d,11+baseSize);
@@ -232,7 +237,12 @@ Event decode(const uint8_t* d, size_t n) {
     e.type = EventType::Telemetry; e.phase = d[13]; e.activeWeightTenths=u16le(d,22); return e;
   }
   if (vendor(d, n, 0x82, 0x3b) && n >= 74) {
-    e.type = EventType::PerRep; e.setCounter = u16le(d,15); e.repCount = u16le(d,17); return e;
+    // Captured set 9: pull 0 / return 1, pull 1 / return 2, ... summary 8.
+    // Pull starts the next rep; return already reports its completed count.
+    // Keep both phases on the same displayed count without altering summaries.
+    // The TV bridge separately guards values outside its uint16 count field.
+    if(d[13]!=1&&d[13]!=2)return e;
+    e.type = EventType::PerRep; e.setCounter = u16le(d,15); e.repCount = u16le(d,17)+(d[13]==1?1:0); return e;
   }
   if (vendor(d, n, 0x85, 0x5f) && n >= 110) {
     e.type = EventType::SetSummary; e.repCount = u16le(d, 26); return e;
