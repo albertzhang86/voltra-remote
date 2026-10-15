@@ -1,6 +1,7 @@
 #include "board.h"
 #include "../ui/ui.h"
 #include <Arduino.h>
+#include <HWCDC.h>
 #include <Wire.h>
 #include <Arduino_GFX_Library.h>
 #include <lvgl.h>
@@ -104,5 +105,12 @@ void traceDial(const char* reason,int field,int direction,int before,int target,
 }
 void logInputs(){if(Serial.availableForWrite()>80)Serial.printf("[battery] mv=%lu estimatedPercent=%d\n",(unsigned long)batteryMv,batteryLevel);Serial.printf("[input] reads=%lu errors=%lu presses=%lu xy=%d,%d turns=%lu left=%lu right=%lu\n",(unsigned long)touchReads,(unsigned long)touchErrors,(unsigned long)touchPresses,touchX,touchY,(unsigned long)rotateEvents,(unsigned long)rotateLeft,(unsigned long)rotateRight);}
 int batteryPercent(){return batteryLevel;}
+bool usbPowerConnected(){
+  // Espressif checks USB SOF traffic, independently of an open serial monitor.
+  // No charge-status pin/PMIC is exposed on this board. A charge-only adapter
+  // cannot be detected here, and an unknown ADC value is not charging evidence.
+  // https://github.com/espressif/arduino-esp32/blob/3.3.11/cores/esp32/HWCDC.h
+  return HWCDC::isPlugged();
+}
 void setBacklight(uint8_t level){analogWrite(21,level);}
 }

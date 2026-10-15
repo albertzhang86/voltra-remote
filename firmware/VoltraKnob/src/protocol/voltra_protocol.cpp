@@ -45,6 +45,9 @@ bool bandMaximumFrame(int pounds,uint8_t* storage,Frame& out){
 Frame authFrame() { return {frames::AUTH_KNOB, sizeof(frames::AUTH_KNOB)}; }
 Frame authFrameFallback() { return {frames::AUTH_IPHONE, sizeof(frames::AUTH_IPHONE)}; }
 Frame telemetrySubscribeAllFrame() { return {frames::TELEMETRY_SUBSCRIBE_ALL, sizeof(frames::TELEMETRY_SUBSCRIBE_ALL)}; }
+Frame readRuntimeWireWeightFrame() { return {frames::READ_RUNTIME_WIRE_WEIGHT, sizeof(frames::READ_RUNTIME_WIRE_WEIGHT)}; }
+Frame readTelemetryRateFrame() { return {frames::READ_TELEMETRY_RATE, sizeof(frames::READ_TELEMETRY_RATE)}; }
+Frame readTelemetrySubscriptionFrame() { return {frames::READ_TELEMETRY_SUBSCRIPTION, sizeof(frames::READ_TELEMETRY_SUBSCRIPTION)}; }
 Frame readWeightUnitFrame() { return {frames::READ_WEIGHT_UNIT, sizeof(frames::READ_WEIGHT_UNIT)}; }
 Frame readCableFrame(){return {frames::READ_CABLE,sizeof(frames::READ_CABLE)};}
 Frame readLengthUnitFrame(){return {frames::READ_LENGTH_UNIT,sizeof(frames::READ_LENGTH_UNIT)};}
@@ -126,7 +129,7 @@ inline size_t cmd0fWidth(uint8_t hi, uint8_t lo) {
   if(lo==0x51&&hi==0x6c)return 1; // COWORKER_CONN_ST
   if(lo==0x54&&hi==0x38)return 1; // LAST_COWORKER_ROLE (saved, not proof of active Twin)
   if(lo==0x53&&(hi==0xb3||hi==0xb4||hi==0xb5))return 2;
-  if (lo == 0x3e && (hi == 0x86 || hi == 0x87 || hi == 0x88 || hi == 0x89 || hi == 0x82)) return 2;
+  if (lo == 0x3e && (hi == 0x86 || hi == 0x87 || hi == 0x88 || hi == 0x89 || hi == 0x82 || hi == 0x83)) return 2;
   if (lo == 0x50 && hi == 0x6a) return 2;
   if(lo==0x50&&hi==0x11)return 1;
   if (lo == 0x53 && (hi == 0x62 || hi == 0xb7 || hi == 0xd2)) return 2;
@@ -145,6 +148,7 @@ inline void applyParam(Event& e, uint8_t hi, uint8_t lo, int value) {
   else if(lo==0x53&&hi==0xb3)e.twinMainForce=value;
   else if(lo==0x53&&hi==0xb4)e.twinSubForce=value;
   else if(lo==0x53&&hi==0xb5)e.twinTotalForce=value;
+  else if (hi == 0x83 && lo == 0x3e) {e.hasRuntimeWeight=true;e.runtimeWeightLbs=static_cast<int16_t>(value);}
   else if (hi == 0x86 && lo == 0x3e) e.weightLbs = value;
   else if (hi == 0x87 && lo == 0x3e) e.chainsLbs = value;
   else if (hi == 0x88 && lo == 0x3e) e.eccentricLbs = static_cast<int16_t>(value);
@@ -173,9 +177,32 @@ Event decode(const uint8_t* d, size_t n) {
       return e;
     }
   }
+  // The runtime-weight register has an exact signed-16 width. Do not accept a
+  // different register version by truncating it and treating extra bytes as CRC.
+  if(n>=18 && d[0]==0x55 && (d[2]==0x08||d[2]==0x09) && d[10]==0x0f
+     && d[11]==0 && d[12]==1 && d[13]==0 && d[14]==0x83 && d[15]==0x3e){
+    if(n==20){e.type=EventType::Settings;applyParam(e,0x83,0x3e,u16le(d,16));}
+    return e;
+  }
+  if(n>=16 && d[10]==0x10 && d[11]==1 && d[12]==0 && d[13]==0x83 && d[14]==0x3e){
+    if(n==19){e.type=EventType::Settings;applyParam(e,0x83,0x3e,u16le(d,15));}
+    return e;
+  }
+  // Inspect telemetry setup without changing persistent trainer settings. Keep
+  // these isolated: the subscription mask is unsigned and may use every bit.
+  if(n >= 19 && d[0]==0x55 && (d[2]==0x08||d[2]==0x09) && d[10]==0x0f
+     && d[11]==0 && d[12]==1 && d[13]==0 && d[15]==0x51) {
+    const size_t width=n-18;
+    if(d[14]==0x82 && width==1){e.type=EventType::Settings;e.telemetryRateHz=d[16];return e;}
+    if(d[14]==0x83 && width==4){
+      e.type=EventType::Settings;e.hasTelemetrySubscription=true;
+      e.telemetrySubscription=uint32_t(d[16])|(uint32_t(d[17])<<8)|(uint32_t(d[18])<<16)|(uint32_t(d[19])<<24);
+      return e;
+    }
+  }
   // Isolated unit query: parameter 0x506e, documented as uint32 in vendor catalog.
   if(n >= 19 && d[0]==0x55 && (d[2]==0x08||d[2]==0x09) && d[10]==0x0f
-     && d[12]==1 && d[13]==0 && (d[14]==0x6e||d[14]==0x6f) && d[15]==0x50) {
+     && d[11]==0 && d[12]==1 && d[13]==0 && (d[14]==0x6e||d[14]==0x6f) && d[15]==0x50) {
     const size_t width=n-18;
     if(width==1 || width==2 || width==4){
       uint32_t raw=0;for(size_t i=0;i<width;++i)raw|=static_cast<uint32_t>(d[16+i])<<(8*i);
@@ -183,7 +210,25 @@ Event decode(const uint8_t* d, size_t n) {
     }
     return e;
   }
-  if (n == 58 && d[0] == 0x55 && d[1] == 0x3a && d[2] == 0x04 && d[3] == 0x70 && d[10]!=0x10) {
+  // Independent terse runtime (cmd 0xb4). Cortex identifies the first u16
+  // as forceTenthLbs; the optional last u16 is TARGET force, never live force.
+  // Sources 0/1/2 have 6/10/10 payload bytes, optionally followed by that target.
+  // Native Twin sources 0x10..0x12 are a separate, unvalidated contract here.
+  if(n>=13 && d[10]==0xb4){
+    const int source=u16le(d,8);
+    const size_t payloadSize=n-13;
+    const size_t baseSize=source==0?6:10;
+    if(d[0]==0x55&&d[2]==0x04&&source<=2&&(payloadSize==baseSize||payloadSize==baseSize+2)){
+      e.type=EventType::Telemetry;e.activeWeightTenths=u16le(d,11);
+      e.hasTargetForceReport=true;
+      if(payloadSize==baseSize+2){
+        const int target=u16le(d,11+baseSize);
+        if(target!=0xffff)e.targetForceTenths=target;
+      }
+    }
+    return e;
+  }
+  if (n == 58 && d[0] == 0x55 && d[1] == 0x3a && d[2] == 0x04 && d[3] == 0x70 && vendor(d,n,0x81,0x2b)) {
     e.type = EventType::Telemetry; e.phase = d[13]; e.activeWeightTenths=u16le(d,22); return e;
   }
   if (vendor(d, n, 0x82, 0x3b) && n >= 74) {
@@ -215,7 +260,7 @@ Event decode(const uint8_t* d, size_t n) {
     }
     return e;
   }
-  if (n >= 14 && d[0] == 0x55 && (d[2] == 0x08 || d[2] == 0x09) && d[10] == 0x0f) {
+  if (n >= 14 && d[0] == 0x55 && (d[2] == 0x08 || d[2] == 0x09) && d[10] == 0x0f && d[11] == 0) {
     e.type = EventType::Settings;
     const int count = u16le(d, 12);
     size_t off = 14;
@@ -224,19 +269,16 @@ Event decode(const uint8_t* d, size_t n) {
       const uint8_t hi = d[off], lo = d[off + 1];
       off += 2;
       const size_t width = cmd0fWidth(hi, lo);
-      if (width == 0 || off + width > n) break;
+      if (width == 0 || off + width > n-2) break;
       const int value = width == 2 ? u16le(d, off) : d[off];
       off += width;
       applyParam(e, hi, lo, value);
     }
     return e;
   }
-  if (d[0] == 0x55 && d[1] == 0x12 && n >= 18) {
-    e.type = EventType::ModeConfirmed;
-    if (d[13] == 0x89 && d[14] == 0x3e) e.fitnessMode = d[15];
-    else e.mode = d[15];
-    return e;
-  }
+  // A frame's length does not identify its parameter. Single-param mode
+  // reports are already decoded by cmd 0x10 above; an 18-byte acknowledgement
+  // or unrelated report must never overwrite mode or motor state.
   if (d[0] == 0x55 && d[1] == 0x23 && n >= 35) { e.type = EventType::Battery; e.battery = d[11]; return e; }
   if (d[0] == 0x55 && d[1] == 0x34 && n >= 52) { e.type = EventType::Battery; e.battery = d[12]; return e; }
   return e;

@@ -28,3 +28,6 @@ build/host/test_voice_capture
 
 $CXX test/test_tv_bridge.cpp -o build/host/test_tv_bridge
 build/host/test_tv_bridge
+
+$CXX test/test_twin.cpp $SRC/protocol/voltra_protocol.cpp -o build/host/test_twin
+build/host/test_twin

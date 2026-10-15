@@ -20,15 +20,28 @@ static uint32_t ringColor=0;
 static int isoCalls=0,isoRequestedIndex=-1,isoRequestedValue=-1;
 static int rotation=0,settingCalls=0,bandCalls=0,bandRequested=-1,damperCalls=0,damperRequested=-1;
 namespace tvbridge {
-bool open=false;
+bool open=false,savedTv=false,tvConnected=false;
+int forgetCalls=0;
 void openPairing(){open=true;} void disconnect(){open=false;}
-bool connected(){return false;} bool pairing(){return open;} int passkey(){return open?123456:-1;}
+bool connected(){return tvConnected;} bool pairing(){return open;} int passkey(){return open?123456:-1;}
+bool trusted(){return savedTv;} bool findingTrainers(){return false;} void findTrainers(){}
+bool forgetTvs(){++forgetCalls;savedTv=false;tvConnected=false;open=false;return true;}
 }
-namespace board {int batteryPercent(){return 76;} void traceDial(const char*,int,int,int,int,int,bool,bool,uint32_t){} void setRingColor(uint32_t rgb){ringColor=rgb;} bool pollRotate(RotateEvent& ev){if(!rotation)return false;ev={static_cast<int8_t>(rotation),now};rotation=0;return true;}}
+static bool usbConnected=false;
+namespace board {bool usbPowerConnected(){return usbConnected;} int batteryPercent(){return 76;} void traceDial(const char*,int,int,int,int,int,bool,bool,uint32_t){} void setRingColor(uint32_t rgb){ringColor=rgb;} bool pollRotate(RotateEvent& ev){if(!rotation)return false;ev={static_cast<int8_t>(rotation),now};rotation=0;return true;}}
 namespace vlink {
 VoltraLink voltraLink;
 DeviceState VoltraLink::state(){return device;}
 void VoltraLink::setDiscoveryVisible(bool){}
+bool VoltraLink::forgetTrainer(int slot,const char* expected){if(!canForgetTrainer(device,slot,now)||strcmp(expected,device.trainers[slot].address))return false;device.trainers[slot]={};if(device.selected==slot){device.selected=-1;++device.session;device.link=LinkState::Scanning;}return true;}
+void VoltraLink::rediscoverTrainers(){}
+bool VoltraLink::selectNearbyTrainer(const char* address){
+ if(!canSwitch(device,now))return false;
+ const Trainer* candidate=nullptr;for(const auto& trainer:device.nearby)if(!strcmp(trainer.address,address)&&nearbyAdvertisement(trainer,now))candidate=&trainer;
+ if(!candidate)return false;
+ for(int i=0;i<2;++i)if(!device.trainers[i].address[0]){device.trainers[i]=*candidate;device.selected=i;++device.session;return true;}
+ strcpy(device.message,"Saved slots full: Manage devices");return false;
+}
 bool VoltraLink::selectTrainer(int n){if(pairedFollower(device,n,now)||!canSwitch(device,now))return false;device.selected=n;++device.session;return true;}
 bool VoltraLink::requestParameter(Parameter p){
  if(!fresh(device,now))return false;
@@ -42,11 +55,20 @@ bool VoltraLink::requestIsokinetic(int index,int value){if(!canEditIsokinetic(de
 bool VoltraLink::requestCable(bool open){if(open&&(!canSwitch(device,now)||device.loaded||device.armed||device.mode<=0))return false;device.cableActive=open;return true;}
 bool VoltraLink::requestLoad(uint32_t expectedSession){if(expectedSession!=UINT32_MAX&&expectedSession!=device.session)return false;++loadCalls;return canLoad(device,now);}
 bool VoltraLink::requestUnload(uint32_t expectedSession,UnloadSource){if(expectedSession!=UINT32_MAX&&expectedSession!=device.session)return false;++unloadCalls;return true;}
+bool VoltraLink::requestTwin(bool create,uint32_t,uint32_t,uint32_t){
+ if(!canChangeTwin(device,now,create))return false;
+ device.twinConnection=create?2:0;device.endpoint.status=create?0x12:0;device.twinMs=device.endpointMs=now;
+ strcpy(device.endpoint.peer,create?device.trainers[1-device.selected].address:"00:00:00:00:00:00");return true;
+}
 bool VoltraLink::requestWeightMode(){return requestMode(1);}
 bool VoltraLink::requestMode(int mode){if(!canSwitch(device,now)||!fresh(device,now))return false;device.mode=mode;device.fitnessMode=mode?4:0;return true;}
 }
 bool simulateAdvertising=true;
 void snapshot(const char* path){
+ device.endpoint.valid=true;device.endpoint.status=device.twinConnection==2?0x12:0;
+ strcpy(device.endpoint.local,device.trainers[device.selected>=0?device.selected:0].address);
+ strcpy(device.endpoint.peer,device.twinConnection==2?device.trainers[1-(device.selected>=0?device.selected:0)].address:"00:00:00:00:00:00");
+ device.endpointMs=device.twinConnection==2?device.twinMs:now;
  if(simulateAdvertising)for(auto& t:device.trainers){t.seen=true;t.lastSeenMs=now;}
  for(int i=0;i<10;++i){now+=20;device.statusMs=now;if(device.twinRoleMs&&now-device.twinRoleMs<3500)device.twinRoleMs=now;ui::loop();lv_timer_handler();}
  FILE* f=fopen(path,"wb");fprintf(f,"P6\n360 360\n255\n");
@@ -66,16 +88,38 @@ int main(){
  assert(!lv_obj_has_flag(batteryWidget,LV_OBJ_FLAG_CLICKABLE));
  lv_obj_update_layout(batteryWidget);assert(lv_obj_get_width(batteryWidget)==66);
  now+=900;snapshot("build/preview-splash.ppm");now+=1200;snapshot("build/preview-selector.ppm");
+ auto swipePointer=[&](bool left){
+  const int before=unloadCalls;
+  pointerX=left?210:150;pointerY=160;touching=true;snapshot("build/swipe-start.ppm");
+  for(int i=0;i<4;++i){pointerX+=left?-30:30;now+=35;device.statusMs=now;ui::loop();lv_timer_handler();}
+  touching=false;snapshot("build/swipe-end.ppm");
+  assert(unloadCalls==before); // Swiping over a number must not unload.
+ };
  auto* trainerSelector=lv_obj_get_child(lv_screen_active(),-1);
- lv_obj_send_event(lv_obj_get_child(trainerSelector,5),LV_EVENT_CLICKED,nullptr);
+ auto* toolsPanel=lv_obj_get_child(trainerSelector,5);
  auto* tvPanel=lv_obj_get_child(lv_layer_top(),0);
+ // A real touch near the new button's lower-right corner must open the page,
+ // including while loaded. Viewing TV settings must not load/unload the trainer.
+ device.loaded=true;device.fitnessMode=5;
+ swipePointer(false);snapshot("build/preview-connection-tools.ppm");
+ assert(!lv_obj_has_flag(toolsPanel,LV_OBJ_FLAG_HIDDEN));
+ device.loaded=false;device.fitnessMode=4;snapshot("build/preview-connections-ready.ppm");
+ device.loaded=true;device.fitnessMode=5;
+ pointerX=280;pointerY=160;touching=true;snapshot("build/preview-tv-link-touch.ppm");
+ touching=false;snapshot("build/preview-tv-loaded.ppm");
  assert(!lv_obj_has_flag(tvPanel,LV_OBJ_FLAG_HIDDEN));
+ assert(lv_obj_has_state(lv_obj_get_child(tvPanel,3),LV_STATE_DISABLED));
+ assert(strcmp(lv_label_get_text(lv_obj_get_child(tvPanel,1)),"Unload VOLTRA to pair")==0);
+ assert(loadCalls==0&&unloadCalls==0);
+ device.loaded=false;device.fitnessMode=4;snapshot("build/preview-tv-ready.ppm");
+ assert(!lv_obj_has_state(lv_obj_get_child(tvPanel,3),LV_STATE_DISABLED));
  lv_obj_send_event(lv_obj_get_child(tvPanel,3),LV_EVENT_CLICKED,nullptr);
  rotation=1;snapshot("build/preview-tv-pairing.ppm");
  assert(strcmp(lv_label_get_text(lv_obj_get_child(tvPanel,2)),"123456")==0);
  assert(settingCalls==0&&loadCalls==0);
  lv_obj_send_event(lv_obj_get_child(tvPanel,4),LV_EVENT_CLICKED,nullptr);
- auto* selector=lv_obj_get_child(lv_screen_active(),-1);lv_obj_send_event(lv_obj_get_child(selector,2),LV_EVENT_CLICKED,nullptr);snapshot("build/preview-weight.ppm");
+ swipePointer(true);assert(lv_obj_has_flag(toolsPanel,LV_OBJ_FLAG_HIDDEN));
+ auto* selector=lv_obj_get_child(lv_screen_active(),-1);lv_obj_send_event(lv_obj_get_child(lv_obj_get_child(selector,2),0),LV_EVENT_CLICKED,nullptr);snapshot("build/preview-weight.ppm");
  // Twin: observed controller state, combined rounded weight, icon, disabled follower.
  device.weightLbs=179;device.twinConnection=2;device.twinMs=now;device.twinLastRole=1;device.twinRoleMs=now;
  snapshot("build/preview-twin-weight.ppm");
@@ -108,13 +152,13 @@ int main(){
  device.twinMs=now;device.twinRoleMs=now;
  lv_obj_send_event(lv_obj_get_child(lv_screen_active(),1),LV_EVENT_CLICKED,nullptr);
  snapshot("build/preview-twin-selector.ppm");
- auto* follower=lv_obj_get_child(selector,3);
+ auto* follower=lv_obj_get_child(lv_obj_get_child(selector,2),1);
  assert(lv_obj_has_state(follower,LV_STATE_DISABLED));
  assert(strcmp(lv_label_get_text(lv_obj_get_child(follower,1)),"Paired")==0);
- assert(strcmp(lv_label_get_text(lv_obj_get_child(lv_obj_get_child(selector,2),1)),"Control")==0);
+ assert(strcmp(lv_label_get_text(lv_obj_get_child(lv_obj_get_child(lv_obj_get_child(selector,2),0),1)),"Control")==0);
  lv_obj_send_event(follower,LV_EVENT_CLICKED,nullptr);assert(device.selected==0);
  // Explicit override releases the session-level UI lock.
- lv_obj_send_event(lv_obj_get_child(selector,2),LV_EVENT_CLICKED,nullptr);
+ lv_obj_send_event(lv_obj_get_child(lv_obj_get_child(selector,2),0),LV_EVENT_CLICKED,nullptr);
  device.twinConnection=0;device.weightLbs=61;snapshot("build/preview-twin-ended.ppm");
  assert(!lv_obj_has_state(follower,LV_STATE_DISABLED));
  assert(lv_obj_has_flag(lv_obj_get_child(lv_screen_active(),7),LV_OBJ_FLAG_HIDDEN));
@@ -136,13 +180,7 @@ int main(){
  lv_obj_send_event(action,LV_EVENT_PRESSED,nullptr);lv_obj_send_event(action,LV_EVENT_CLICKED,nullptr);assert(unloadCalls==2);
  auto* modePanel=lv_obj_get_child(lv_screen_active(),-2);
  // Use actual pointer gestures starting on the loaded weight numeral.
- auto swipePointer=[&](bool left){
-  const int before=unloadCalls;
-  pointerX=left?210:150;pointerY=160;touching=true;snapshot("build/swipe-start.ppm");
-  for(int i=0;i<4;++i){pointerX+=left?-30:30;now+=35;device.statusMs=now;ui::loop();lv_timer_handler();}
-  touching=false;snapshot("build/swipe-end.ppm");
-  assert(unloadCalls==before); // Swiping over a number must not unload.
- };
+
  swipePointer(true);assert(lv_obj_has_flag(modePanel,LV_OBJ_FLAG_HIDDEN));
  device.loaded=false;device.armed=true;swipePointer(true);assert(lv_obj_has_flag(modePanel,LV_OBJ_FLAG_HIDDEN));
  device.armed=false;device.fitnessMode=4;device.settingsMs=now;
@@ -172,7 +210,7 @@ int main(){
  touching=true;snapshot("build/preview-idle-touch.ppm");
  touching=false;snapshot("build/preview-idle-selector.ppm");
  assert(!lv_obj_has_flag(selector,LV_OBJ_FLAG_HIDDEN));
- pointerY=224;touching=true;snapshot("build/preview-idle-select-down.ppm");
+ pointerY=200;touching=true;snapshot("build/preview-idle-select-down.ppm");
  touching=false;snapshot("build/preview-idle-selected.ppm");
  assert(device.selected==1);
  assert(lv_obj_has_flag(selector,LV_OBJ_FLAG_HIDDEN));
@@ -349,18 +387,52 @@ int main(){
  device.fitnessMode=4;snapshot("build/mapped-state-return.ppm");assert(lv_obj_has_flag(modePanel,LV_OBJ_FLAG_HIDDEN));
  device.mode=2;device.fitnessMode=4;device.loaded=false;device.selected=0;device.twinConnection=2;device.twinMs=now;device.twinLastRole=2;device.twinRoleMs=now;
  lv_obj_send_event(lv_obj_get_child(lv_screen_active(),1),LV_EVENT_CLICKED,nullptr);snapshot("build/preview-role-swapped.ppm");
- assert(!lv_obj_has_state(lv_obj_get_child(selector,2),LV_STATE_DISABLED));assert(lv_obj_has_state(lv_obj_get_child(selector,3),LV_STATE_DISABLED));
- device.loaded=true;device.fitnessMode=5;lv_obj_send_event(lv_obj_get_child(selector,4),LV_EVENT_CLICKED,nullptr);snapshot("build/controller-switch-loaded.ppm");assert(lv_obj_has_state(lv_obj_get_child(selector,3),LV_STATE_DISABLED));
- device.loaded=false;device.fitnessMode=4;device.twinMs=now;lv_obj_send_event(lv_obj_get_child(selector,4),LV_EVENT_CLICKED,nullptr);snapshot("build/controller-switch-unlocked.ppm");assert(!lv_obj_has_state(lv_obj_get_child(selector,3),LV_STATE_DISABLED));
- lv_obj_send_event(lv_obj_get_child(selector,3),LV_EVENT_CLICKED,nullptr);assert(device.selected==1);
+ assert(!lv_obj_has_state(lv_obj_get_child(lv_obj_get_child(selector,2),0),LV_STATE_DISABLED));assert(lv_obj_has_state(lv_obj_get_child(lv_obj_get_child(selector,2),1),LV_STATE_DISABLED));
+ device.loaded=true;device.fitnessMode=5;lv_obj_send_event(lv_obj_get_child(selector,3),LV_EVENT_CLICKED,nullptr);snapshot("build/controller-switch-loaded.ppm");assert(lv_obj_has_state(lv_obj_get_child(lv_obj_get_child(selector,2),1),LV_STATE_DISABLED));
+ device.loaded=false;device.fitnessMode=4;device.mode=0;device.twinMs=now;snapshot("build/preview-twin-exit-ready.ppm");
+ lv_obj_send_event(lv_obj_get_child(selector,3),LV_EVENT_CLICKED,nullptr);snapshot("build/preview-twin-exited.ppm");assert(!lv_obj_has_state(lv_obj_get_child(lv_obj_get_child(selector,2),1),LV_STATE_DISABLED));
+ lv_obj_send_event(lv_obj_get_child(lv_obj_get_child(selector,2),1),LV_EVENT_CLICKED,nullptr);assert(device.selected==1);
  simulateAdvertising=false;device.twinConnection=0;device.selected=0;
  lv_obj_send_event(lv_obj_get_child(lv_screen_active(),1),LV_EVENT_CLICKED,nullptr);
  device.trainers[1].lastSeenMs=now-11000;snapshot("build/preview-trainer-not-detected.ppm");
- auto* absent=lv_obj_get_child(selector,3);assert(lv_obj_has_state(absent,LV_STATE_DISABLED));
- assert(strcmp(lv_label_get_text(lv_obj_get_child(absent,1)),"Not detected")==0);
+ auto* absent=lv_obj_get_child(lv_obj_get_child(selector,2),1);assert(lv_obj_has_state(absent,LV_STATE_DISABLED));
+ assert(strcmp(lv_label_get_text(lv_obj_get_child(absent,1)),"Saved · Not detected")==0);
  lv_obj_send_event(absent,LV_EVENT_CLICKED,nullptr);assert(device.selected==0);
  device.trainers[1].lastSeenMs=now;snapshot("build/preview-trainer-nearby.ppm");assert(!lv_obj_has_state(absent,LV_STATE_DISABLED));
- assert(strcmp(lv_label_get_text(lv_obj_get_child(absent,1)),"Nearby")==0);
+ assert(strcmp(lv_label_get_text(lv_obj_get_child(absent,1)),"Saved · Nearby")==0);
+ // A saved but unobserved peer never counts as nearby, including with TV discovery paused.
+ device.discoveryPausedForTv=true;device.trainers[1].seen=false;snapshot("build/preview-saved-reconnect.ppm");
+ assert(lv_obj_has_flag(lv_obj_get_child(selector,3),LV_OBJ_FLAG_HIDDEN));
+ assert(strcmp(lv_label_get_text(lv_obj_get_child(absent,1)),"Saved · Reconnect")==0);
+ device.discoveryPausedForTv=false;device.trainers[1].seen=true;device.trainers[1].lastSeenMs=now;
+ // A third nearby trainer remains discoverable with both saved slots occupied.
+ auto& discovered=device.nearby[0];strcpy(discovered.address,"10:20:30:aa:bb:03");strcpy(discovered.name,"VOLTRA - New");discovered.seen=true;discovered.lastSeenMs=now;
+ snapshot("build/preview-discovery-list.ppm");
+ auto* list=lv_obj_get_child(selector,2);auto* newRow=lv_obj_get_child(list,2);
+ assert(!lv_obj_has_flag(newRow,LV_OBJ_FLAG_HIDDEN));
+ assert(strcmp(lv_label_get_text(lv_obj_get_child(newRow,1)),"New · Nearby")==0);
+ assert(lv_obj_has_flag(lv_obj_get_child(selector,3),LV_OBJ_FLAG_HIDDEN)); // three nearby is ambiguous
+ lv_obj_scroll_to_y(list,140,LV_ANIM_OFF);snapshot("build/preview-unsaved-nearby.ppm");
+ const uint32_t beforeNewSession=device.session;
+ lv_obj_send_event(newRow,LV_EVENT_CLICKED,nullptr);snapshot("build/preview-saved-slots-full.ppm");
+ assert(device.session==beforeNewSession&&strcmp(device.trainers[1].address,"10:20:30:aa:bb:02")==0);
+ assert(strcmp(lv_label_get_text(lv_obj_get_child(selector,1)),"Saved slots full · Manage devices")==0);
+ // Recycled row identity between touch-down and release cannot select another device.
+ lv_obj_send_event(newRow,LV_EVENT_PRESSED,nullptr);
+ strcpy(discovered.address,"10:20:30:aa:bb:04");snapshot("build/discovery-row-changed.ppm");
+ lv_obj_send_event(newRow,LV_EVENT_CLICKED,nullptr);assert(device.session==beforeNewSession);
+ // A free saved slot accepts an explicitly selected nearby device.
+ const auto savedRight=device.trainers[1];device.trainers[1]={};strcpy(device.message,"Connected");
+ snapshot("build/preview-new-trainer-free-slot.ppm");lv_obj_scroll_to_y(list,0,LV_ANIM_OFF);
+ lv_obj_send_event(lv_obj_get_child(list,1),LV_EVENT_CLICKED,nullptr);snapshot("build/new-trainer-selected.ppm");
+ assert(device.selected==1&&strcmp(device.trainers[1].address,discovered.address)==0);
+ device.trainers[1]=savedRight;device.nearby[0]={};device.selected=0;device.trainers[1].lastSeenMs=now;
+ lv_obj_send_event(lv_obj_get_child(lv_screen_active(),1),LV_EVENT_CLICKED,nullptr);snapshot("build/preview-two-trainers-restored.ppm");
+ // USB power renders only the bolt, without a misleading numeric percentage.
+ usbConnected=true;now+=1000;snapshot("build/preview-selector-usb.ppm");
+ assert(!strcmp(lv_label_get_text(lv_obj_get_child(batteryWidget,0)),""));
+ usbConnected=false;now+=1000;snapshot("build/preview-selector-battery.ppm");
+ assert(!strcmp(lv_label_get_text(lv_obj_get_child(batteryWidget,0)),"76%"));
  // Mitigation must block a voice Release before it reaches the link, even
  // with a loaded, connected trainer. Existing touch assertions above still pass.
  device.link=vlink::LinkState::Ready;device.selected=0;device.loaded=true;device.fitnessMode=5;
@@ -370,6 +442,34 @@ int main(){
  device.loaded=false;device.fitnessMode=4;
  assert(!ui::voiceAction({voice::EventKind::Load,now,device.session,device.mode}));
  assert(loadCalls==beforeVoiceLoads);
+ // Forget is explicit, cancellable, safe while unloaded, and sends no training commands.
+ const int forgetLoads=loadCalls,forgetUnloads=unloadCalls,forgetSettings=settingCalls;
+ device.selected=0;device.link=vlink::LinkState::Ready;device.mode=1;device.fitnessMode=4;device.loaded=false;
+ lv_obj_send_event(lv_obj_get_child(lv_screen_active(),1),LV_EVENT_CLICKED,nullptr);snapshot("build/preview-manage-entry.ppm");
+ auto* manage=lv_obj_get_child(lv_layer_top(),1);auto* confirm=lv_obj_get_child(lv_layer_top(),2);
+ swipePointer(false);snapshot("build/preview-tools-manage-entry.ppm");
+ lv_obj_send_event(lv_obj_get_child(toolsPanel,3),LV_EVENT_CLICKED,nullptr);snapshot("build/preview-manage-trainers.ppm");
+ assert(!lv_obj_has_flag(manage,LV_OBJ_FLAG_HIDDEN));
+ lv_obj_send_event(lv_obj_get_child(manage,2),LV_EVENT_CLICKED,nullptr);snapshot("build/preview-forget-trainer.ppm");
+ assert(!lv_obj_has_flag(confirm,LV_OBJ_FLAG_HIDDEN));
+ lv_obj_send_event(lv_obj_get_child(confirm,4),LV_EVENT_CLICKED,nullptr);assert(device.trainers[0].address[0]);
+ lv_obj_send_event(lv_obj_get_child(manage,2),LV_EVENT_CLICKED,nullptr);
+ device.loaded=true;device.fitnessMode=5;snapshot("build/preview-forget-loaded.ppm");
+ assert(lv_obj_has_state(lv_obj_get_child(confirm,3),LV_STATE_DISABLED));
+ lv_obj_send_event(lv_obj_get_child(confirm,3),LV_EVENT_CLICKED,nullptr);assert(device.trainers[0].address[0]);
+ device.loaded=false;device.fitnessMode=4;snapshot("build/preview-forget-trainer-ready.ppm");
+ const uint32_t forgetSession=device.session;
+ lv_obj_send_event(lv_obj_get_child(confirm,3),LV_EVENT_CLICKED,nullptr);snapshot("build/preview-trainer-forgotten.ppm");
+ assert(!device.trainers[0].address[0]&&device.selected==-1&&device.session>forgetSession);
+ lv_obj_send_event(lv_obj_get_child(manage,4),LV_EVENT_CLICKED,nullptr);snapshot("build/preview-forget-back.ppm");
+ tvbridge::open=false;tvbridge::savedTv=true;tvbridge::tvConnected=true;
+ lv_obj_send_event(lv_obj_get_child(toolsPanel,2),LV_EVENT_CLICKED,nullptr);snapshot("build/preview-tv-forget-action.ppm");
+ lv_obj_send_event(lv_obj_get_child(tvPanel,6),LV_EVENT_CLICKED,nullptr);snapshot("build/preview-forget-tv-confirm.ppm");
+ lv_obj_send_event(lv_obj_get_child(confirm,4),LV_EVENT_CLICKED,nullptr);assert(tvbridge::forgetCalls==0&&tvbridge::savedTv);
+ lv_obj_send_event(lv_obj_get_child(tvPanel,6),LV_EVENT_CLICKED,nullptr);
+ snapshot("build/preview-forget-tv-ready.ppm");lv_obj_send_event(lv_obj_get_child(confirm,3),LV_EVENT_CLICKED,nullptr);
+ snapshot("build/preview-tv-forgotten.ppm");assert(tvbridge::forgetCalls==1&&!tvbridge::savedTv&&!tvbridge::tvConnected);
+ assert(loadCalls==forgetLoads&&unloadCalls==forgetUnloads&&settingCalls==forgetSettings);
  printf("Tap-number load, loaded weight edits, mode menu, session, availability and idle navigation tests passed.\n");
  return 0;
 }

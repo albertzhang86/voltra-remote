@@ -49,6 +49,7 @@ int main(){
  CHECK(directRollover.accept({EventKind::Load,300},300));
  vlink::DeviceState state;state.link=vlink::LinkState::Ready;state.selected=0;state.session=7;
  state.mode=1;state.fitnessMode=4;state.weightLbs=20;state.chainsLbs=0;state.eccentricLbs=0;state.statusMs=state.settingsMs=1000;
+ state.endpoint.valid=true;state.endpoint.status=0;state.endpointMs=1000;strcpy(state.endpoint.local,"02:00:00:00:00:01");strcpy(state.endpoint.peer,"00:00:00:00:00:00");
  Event load{EventKind::Load,1100,7,1},release{EventKind::Release,1100,7,1};
  CHECK(canAct(load,state,1100,true,false,false,false,true));
  CHECK(!canAct(load,state,1100,false,false,false,false,true));

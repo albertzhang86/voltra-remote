@@ -11,6 +11,7 @@ fi
 .tools/arduino-cli --config-file arduino-cli.yaml core update-index
 .tools/arduino-cli --config-file arduino-cli.yaml core install esp32:esp32@3.3.11
 .tools/arduino-cli --config-file arduino-cli.yaml lib install 'NimBLE-Arduino@2.5.1'
+python3 tools/patch_nimble.py
 ctags_path=.arduino/data/packages/builtin/tools/ctags/5.8-arduino11/ctags
 if ! "$ctags_path" --version >/dev/null 2>&1; then
   source_dir=$(mktemp -d -t voltra-ctags)

@@ -92,9 +92,9 @@ static void testDecode() {
   e = decode(b, n);
   CHECK(e.type == EventType::Settings); CHECK_EQ(e.weightLbs, 200); CHECK_EQ(e.mode, 1);
 
-  // Mode confirmation: value at 15.
+  // Length alone cannot identify a mode report.
   n = synth(b, 18, "551204", {{15, 4}});
-  e = decode(b, n); CHECK(e.type == EventType::ModeConfirmed); CHECK_EQ(e.mode, 4);
+  e = decode(b, n); CHECK(e.type == EventType::Unknown); CHECK_EQ(e.mode, -1);
 
   // Device init battery at 11.
   n = synth(b, 35, "552304", {{11, 87}});
@@ -109,13 +109,47 @@ static void testDecode() {
   e = decode(b, n); CHECK(e.type == EventType::Unknown);
 
   // Telemetry stream, phase eccentric.
-  n = synth(b, 58, "553a0470", {{13, 3}});   // real stream frames are 0x3a = 58 bytes
+  n = synth(b, 58, "553a0470", {{10,0xaa},{11,0x81},{12,0x2b},{13, 3}});   // real stream frames are 0x3a = 58 bytes
   e = decode(b, n); CHECK(e.type == EventType::Telemetry); CHECK_EQ(e.phase, 3);
   b[22]=123;b[23]=1;e=decode(b,n);CHECK_EQ(e.activeWeightTenths,379);
   b[10]=0x10;e=decode(b,n);CHECK_EQ(e.activeWeightTenths,-1);
   n = synth(b, 20, "553a0470", {{1, 0x3a}, {13, 3}});   // too short (keep the 0x3a header byte)
   e = decode(b, n); CHECK(e.type == EventType::Unknown);
 
+  // Real independent runtime captures from the user's trainer. The trailing
+  // 0x003c is the 6 lb TARGET; force is the first payload word (1.0..1.2 lb).
+  for(auto captured:{
+    std::pair<const char*,int>{"551904e410aacb6e0200b40b0003000000030000003c0045a8",11},
+    {"551904e410aa2f6f0100b40a0003000000000000003c007142",10},
+    {"551504a910aa936f0000b40c00030000003c00d8db",12},
+    {"551504a910aaf76f0000b40b00030000003c009387",11}
+  }){
+    n=fromHex(captured.first,b,sizeof(b));CHECK(validFrame(b,n));e=decode(b,n);
+    CHECK(e.type==EventType::Telemetry);CHECK_EQ(e.activeWeightTenths,captured.second);
+    CHECK(e.hasTargetForceReport);CHECK_EQ(e.targetForceTenths,60);
+    CHECK_EQ(e.weightLbs,-1);CHECK_EQ(e.mode,-1);CHECK_EQ(e.fitnessMode,-1);
+  }
+  for(int source:{0,1,2}){
+    const size_t base=source==0?19:23;
+    for(size_t length:{base,base+2}){
+      n=synth(b,length,"551304",{{8,source},{10,0xb4},{11,0},{12,0}});
+      e=decode(b,n);CHECK_EQ(e.activeWeightTenths,0); // zero is a measurement
+      CHECK(e.hasTargetForceReport);CHECK_EQ(e.targetForceTenths,length==base?-1:0);
+      if(length==base+2){
+        b[base-2]=0x7b;b[base-1]=1;e=decode(b,n);CHECK_EQ(e.targetForceTenths,379);
+        b[base-2]=0xff;b[base-1]=0xff;e=decode(b,n);CHECK(e.hasTargetForceReport);CHECK_EQ(e.targetForceTenths,-1);
+      }
+      b[11]=0x7b;b[12]=1;e=decode(b,n);CHECK_EQ(e.activeWeightTenths,379);
+      b[9]=1;e=decode(b,n);CHECK(e.type==EventType::Unknown);b[9]=0;
+      b[8]=0x10+source;e=decode(b,n);CHECK(e.type==EventType::Unknown);b[8]=source;
+      b[2]=8;e=decode(b,n);CHECK(e.type==EventType::Unknown);b[2]=4;
+      for(size_t shortLength=13;shortLength<base;++shortLength){e=decode(b,shortLength);CHECK(e.type==EventType::Unknown);}
+    }
+    n=synth(b,base+1,"551304",{{8,source},{10,0xb4}});e=decode(b,n);CHECK(e.type==EventType::Unknown);
+    n=synth(b,base+3,"551304",{{8,source},{10,0xb4}});e=decode(b,n);CHECK(e.type==EventType::Unknown);
+  }
+  // Another packet family with the same 58-byte envelope is not cable force.
+  n=synth(b,58,"553a0470",{{10,7},{22,60}});e=decode(b,n);CHECK_EQ(e.activeWeightTenths,-1);
   // Vendor per-rep: 74 bytes, aa 82 3b at 10..12, setCounter at 15, repCount at 17.
   n = synth(b, 74, "554a04", {{10,0xaa},{11,0x82},{12,0x3b},{15,2},{17,7}});
   e = decode(b, n); CHECK(e.type == EventType::PerRep); CHECK_EQ(e.repCount, 7); CHECK_EQ(e.setCounter, 2);
@@ -135,10 +169,20 @@ static void testDecode() {
   CHECK(fitnessModeLoaded(5)); CHECK(fitnessModeUnloaded(4)); CHECK(!fitnessModeLoaded(4));
 
   // Mode confirmation carrying 893e reports fitnessMode, not training mode.
-  n = synth(b, 18, "551204", {{13,0x89},{14,0x3e},{15,4}});
-  e = decode(b, n); CHECK(e.type == EventType::ModeConfirmed); CHECK_EQ(e.fitnessMode, 4); CHECK_EQ(e.mode, -1);
-  n = synth(b, 18, "551204", {{13,0xb0},{14,0x4f},{15,1}});
-  e = decode(b, n); CHECK(e.type == EventType::ModeConfirmed); CHECK_EQ(e.mode, 1); CHECK_EQ(e.fitnessMode, -1);
+  n = synth(b, 19, "551304", {{10,0x10},{11,1},{13,0x89},{14,0x3e},{15,4}});
+  e = decode(b, n); CHECK(e.type == EventType::Settings); CHECK_EQ(e.fitnessMode, 4); CHECK_EQ(e.mode, -1);
+  n = synth(b, 18, "551204", {{10,0x10},{11,1},{13,0xb0},{14,0x4f},{15,1}});
+  e = decode(b, n); CHECK(e.type == EventType::Settings); CHECK_EQ(e.mode, 1); CHECK_EQ(e.fitnessMode, -1);
+  // Unrelated single-register notifications and write ACKs cannot corrupt mode.
+  n = synth(b,18,"551204",{{10,0x10},{11,1},{13,3},{14,0x51},{15,9}});
+  e=decode(b,n);CHECK_EQ(e.mode,-1);CHECK_EQ(e.fitnessMode,-1);
+  n = synth(b,18,"551208",{{10,0x11},{11,0},{13,0xb0},{14,0x4f},{15,255}});
+  e=decode(b,n);CHECK(e.type==EventType::Unknown);CHECK_EQ(e.mode,-1);CHECK_EQ(e.fitnessMode,-1);
+  n=fromHex("551204c7aa100a20200011010082510a0f36",b,sizeof(b));
+  CHECK(validFrame(b,n));e=decode(b,n);CHECK_EQ(e.mode,-1);CHECK_EQ(e.fitnessMode,-1);
+  // Truncation must not reinterpret CRC bytes as a two-byte fitness value.
+  n=synth(b,18,"551204",{{10,0x10},{11,1},{13,0x89},{14,0x3e},{15,4}});
+  e=decode(b,n);CHECK_EQ(e.fitnessMode,-1);
 
   // cmd 0x0f bulk response: frame type 0x08, count u16 at 12, params from 14.
   n = synth(b, 30, "551e08", {{10,0x0f},{12,3},{13,0},{14,0x86},{15,0x3e},{16,0x28},{17,0x00},{18,0x89},{19,0x3e},{20,0x04},{21,0x00},{22,0xb0},{23,0x4f},{24,1}});
@@ -182,6 +226,41 @@ static void testDecode() {
   e=decode(b,n);CHECK_EQ(e.twinConnection,3);CHECK_EQ(e.twinLastRole,1);CHECK_EQ(e.twinMainForce,162);CHECK_EQ(e.twinSubForce,162);CHECK_EQ(e.twinTotalForce,324);
   for(int i=0;i<MODE_PARAMETER_COUNT;++i){uint8_t storage[17];Frame f;CHECK(readModeParameterFrame(i,storage,f));CHECK(validFrame(f.data,f.len));CHECK_EQ(f.data[10],0x0f);CHECK_EQ(f.data[13]|(f.data[14]<<8),MODE_PARAMETERS[i].id);
     for(int width:{1,2,4}){n=synth(b,18+width,"551308",{{10,0x0f},{12,1},{14,int(MODE_PARAMETERS[i].id&255)},{15,int(MODE_PARAMETERS[i].id>>8)},{16,7}});e=decode(b,n);CHECK_EQ(e.modeParameter,i);CHECK_EQ(e.modeParameterValue,7);CHECK_EQ(e.modeParameterWidth,width);}
+  }
+  // Real 2026-10-13 unloaded trainer readback: runtime wire weight is 1 lb,
+  // while the separately polled configured base weight was 6 lb.
+  n=fromHex("551408ce10aa002020000f000100833e01005867",b,sizeof(b));
+  CHECK(validFrame(b,n));e=decode(b,n);CHECK(e.hasRuntimeWeight);CHECK_EQ(e.runtimeWeightLbs,1);
+  CHECK_EQ(e.weightLbs,-1);CHECK_EQ(e.activeWeightTenths,-1);
+  for(int value:{-32768,-1,0,1,59,32767}){
+    n=synth(b,20,"551408",{{10,0x0f},{12,1},{14,0x83},{15,0x3e},{16,value&255},{17,(value>>8)&255}});
+    e=decode(b,n);CHECK(e.hasRuntimeWeight);CHECK_EQ(e.runtimeWeightLbs,value);
+    n=synth(b,19,"551304",{{10,0x10},{11,1},{13,0x83},{14,0x3e},{15,value&255},{16,(value>>8)&255}});
+    e=decode(b,n);CHECK(e.hasRuntimeWeight);CHECK_EQ(e.runtimeWeightLbs,value);
+  }
+  n=synth(b,19,"551308",{{10,0x0f},{12,1},{14,0x83},{15,0x3e},{16,5}});
+  e=decode(b,n);CHECK(!e.hasRuntimeWeight); // truncated int16, no CRC-as-data
+  for(int width:{0,1,3,4}){
+    n=synth(b,18+width,"551408",{{10,0x0f},{12,1},{14,0x83},{15,0x3e},{16,6}});
+    e=decode(b,n);CHECK(!e.hasRuntimeWeight);
+    n=synth(b,17+width,"551304",{{10,0x10},{11,1},{13,0x83},{14,0x3e},{15,6}});
+    e=decode(b,n);CHECK(!e.hasRuntimeWeight);
+  }
+  // Read-only telemetry setup probes have precise register widths.
+  for(auto query:{readTelemetryRateFrame(),readTelemetrySubscriptionFrame(),readRuntimeWireWeightFrame()}){
+    CHECK(validFrame(query.data,query.len));CHECK_EQ(query.data[10],0x0f);CHECK_EQ(query.data[11],1);
+  }
+  for(int hz:{0,10,40,100}){
+    n=synth(b,19,"551308",{{10,0x0f},{12,1},{14,0x82},{15,0x51},{16,hz}});
+    e=decode(b,n);CHECK_EQ(e.telemetryRateHz,hz);CHECK_EQ(e.mode,-1);
+    b[11]=1;e=decode(b,n);CHECK_EQ(e.telemetryRateHz,-1);
+  }
+  for(uint32_t mask:{0u,0x7bf5u,0x00657bf5u,0xffffffffu}){
+    n=synth(b,22,"551608",{{10,0x0f},{12,1},{14,0x83},{15,0x51}});
+    for(int i=0;i<4;++i)b[16+i]=(mask>>(8*i))&255;
+    e=decode(b,n);CHECK(e.hasTelemetrySubscription);CHECK_EQ(e.telemetrySubscription,mask);CHECK_EQ(e.mode,-1);
+    e=decode(b,n-1);CHECK(!e.hasTelemetrySubscription);
+    b[11]=1;e=decode(b,n);CHECK(!e.hasTelemetrySubscription);
   }
   // Garbage and short input.
   uint8_t junk[3] = {1, 2, 3};

@@ -15,7 +15,8 @@ Cardio, Custom Curves and Isometric Test are excluded. When the trainer reports 
 
 ## Controls
 
-- Tap the trainer name to return to selection. Names are discovered through Bluetooth and saved in stable slots. Startup requires explicitly selecting a trainer.
+- Tap the trainer name to return to selection. Scroll through saved trainers and nearby discoveries; selecting a new trainer saves it in a free slot. The two saved slots are never replaced automatically. Startup requires explicitly selecting a trainer.
+- Swipe right on trainer selection for **TV link**, **Manage devices**, and **Find nearby trainers**. Swipe left to return to the trainer list.
 - Turn the dial to adjust the highlighted setting. The number grows briefly and keeps its mode color. Device confirmation updates the value; a timeout restores the last confirmed value.
 - Swipe left for mode selection. Rotate to highlight, then tap the center icon/text to confirm, or tap an outer icon. Confirmation returns to controls. Swipe right to cancel.
 - Weight Training uses four icon/value controls. Selecting Chains or Inverse Chains reads the trainer's starting value and selects its direction, without writing a fixed preset. Eccentric is added weight, not a percentage. Weight can change while loaded; modifier edits require unloading.
@@ -31,9 +32,43 @@ Protocol limits used here: Weight 5–200 lb; Chains 0–100 lb; Eccentric −19
 
 ## First connection and Twin Mode
 
-Close Beyond+ or disconnect other Bluetooth clients, select the trainer on the knob, and accept its connection prompt if shown. The knob reads existing settings without automatically loading. It needs only USB power afterward; no computer or phone bridge is required. Disconnecting the knob does not unload a trainer.
+Disconnect the trainer from Cortex, Beyond+ and any direct TV connection before
+selecting it on the knob. Each trainer accepts one controlling client at a time;
+closing another app's window may leave its Bluetooth connection active. An occupied
+connection can cause a timeout, but a timeout alone does not prove the cause.
+When using the TV, select **Via knob** so it connects to the knob's bridge instead
+of competing for the trainer. Accept the trainer's connection prompt if shown.
+The knob reads existing settings without automatically loading. It needs only USB
+power afterward; no computer or phone bridge is required. Disconnecting the knob
+does not unload a trainer.
 
-Establish Twin Mode on the trainers before connecting the knob. Select the actual controller. The selector's Control/Paired labels reflect the selected Twin session; reliable physical controller-role detection is not available. If the physical controller changes, unload and use Switch controller. A connection to the follower may read values but cannot control it. The firmware does not hard-code either trainer's identity or automatically hand off connections.
+Trainer discovery pauses before TV advertising starts and stays
+paused while listening for a trusted TV or while the TV link is active. Saved trainers remain
+selectable as **Saved · Reconnect**; their connection and fresh endpoint state still
+have to be verified before controls are enabled. A saved identity is not labeled
+nearby without a recent advertisement or a fresh active connection. Disconnect the
+TV, swipe right on trainer selection, then use **Find nearby trainers** for a
+30-second discovery window.
+This avoids a reproduced ESP32 Bluetooth scheduler assertion (`sch_arb.c:517`)
+when the TV connects during scanning. A
+[related Espressif report](https://github.com/espressif/esp-idf/issues/18063)
+describes the same assertion with concurrent peripheral connections and scanning;
+the local crash log established this knob's failure. After the fix, the physical
+Google TV completed PIN pairing and authenticated, encrypted bridge telemetry.
+
+Select the intended controller, finish training on both machines (idle mode), then
+open trainer selection and choose **Create Twin**. This action appears only when
+exactly two distinct trainers are nearby and one is connected. A new peer can be
+saved in a free slot; occupied saved slots are never replaced. The knob temporarily connects
+to the second nearby trainer, checks both are unloaded, and sends the controller's
+address to that peer. Success requires acknowledgment plus matching native endpoint
+identities. **Exit Twin** confirms independent status and keeps the selected
+controller connected. Neither action is replayed after a disconnect.
+
+Existing Twin controllers are recognized from the endpoint message, with both
+batteries and the actual peer identity. Stale or unknown topology blocks controls.
+The selector cannot switch to a paired peer as if it were independently available.
+There are no hard-coded hardware identities or automatic controller handoffs.
 
 Twin Weight Training values account for the combined display. Band maximum and Damper factors use their own mode-specific readbacks. Hardware testing across every Twin role and firmware version is incomplete.
 
@@ -51,25 +86,84 @@ python3 tools/preview.py  # optional: render actual LVGL UI on macOS
 
 ## TV Bluetooth bridge (development)
 
-The current source adds **TV link** at the bottom of trainer selection. Choose
+Swipe right on trainer selection and open the large **TV link** button on the
+connections page. **TV link**, **Manage devices**, and **Find nearby trainers**
+use matching 240 × 56 px buttons, 16 px labels, and outline icons with clearance
+from the circular display edge. The page is viewable while loaded; starting pairing remains
+disabled with an unload prompt until the trainer allows it. Choose
 **Pair TV**, then **VOLTRA → Via knob → Find knob** in Super AI Gym. Enter the
 knob's displayed six-digit code in Android's Bluetooth pairing prompt. The bridge
-requires authenticated encryption and advertises for two minutes only when opened.
-Disconnect TV is available on the same knob page; reconnect by reopening pairing.
+requires authenticated encryption; new pairing is available for two minutes.
+After pairing, use **Reconnect knob** on the TV without opening a knob menu or
+entering another code, including after reboot. The knob advertises for saved,
+authenticated Secure Connections identities; new TVs require **Pair new TV**.
+**Disconnect TV** drops the current session while preserving the saved bond.
+The TV does not automatically reconnect after an explicit disconnect.
+
+Trusted TV advertising pauses trainer discovery to avoid the reproduced Bluetooth
+scheduler crash. Saved trainer identities remain selectable after reboot; fresh
+connection/readback is still required before control. To discover trainers, first
+disconnect the TV, then swipe right on trainer selection and choose **Find nearby trainers**. TV listening resumes
+after 30 seconds. Build/setup apply `tools/patch_nimble.py` to pinned NimBLE 2.5.1,
+adding an application repeat-pairing callback. Replacement of a saved bond is
+rejected outside an explicit pairing window, before the old bond is deleted.
+
+To reset a device connection, swipe right on trainer selection, choose **Manage devices**,
+choose the saved trainer, then confirm **Forget**. The knob closes that trainer
+connection and removes its saved entry without changing trainer settings or Twin
+mode. Forgetting is blocked while loaded, armed, stale while connected, or busy.
+**TV link → Forget TVs** separately removes authenticated TV bonds and disconnects
+the TV; saved trainers and their bonds remain. Both actions have a cancelable
+confirmation. Also forget the knob on the TV before pairing again after a TV reset.
+
+Use **TV link → Find trainers** to discover a forgotten trainer again. A just-forgotten
+advertisement is ignored during the current search so it does not immediately
+repopulate the saved list; explicit discovery or reboot starts a fresh search.
+Forgetting never sends load, unload, or Twin commands.
 
 The TV follows the knob's selected trainer and can request the four mode/settings
 changes; the existing knob command gates and trainer confirmation remain authoritative.
 Local draft edits block TV changes. The bridge cannot load/unload, select a trainer,
-or create/exit native Twin. TV control of already-Twin trainers is read-only.
+or start training. Bridge v2 supports Create/Exit Twin with verified roles and both
+batteries; its pair/exit request requires idle mode. Twin live force/reps are withheld
+until validated from hardware, rather than doubling a single cable reading.
 Expired commands or commands for an old trainer/TV connection are rejected.
-Live independent cable force is decoded from stream telemetry in tenths of a pound;
-it is not substituted with set weight. Knob and trainer batteries remain separate.
+Independent active weight uses the trainer's reported target resistance while
+loaded, and zero only when fresh fitness state 4 explicitly reports unloaded.
+Unknown/armed load states, stale or missing target readings, unsupported modes,
+and Twin topology report unavailable. Target readings expire after two seconds
+and are cleared across mode, load-state, topology, and connection changes. Neither
+measured cable tension, the runtime wire-weight register (`0x3e83`, signed whole
+lb), nor configured set weight (`0x3e86`) substitutes for a missing target.
+Measured force and four-per-second runtime queries remain separate diagnostics.
+Bridge v2 byte 133 bit 6 identifies target resistance (or explicitly unloaded zero)
+at byte 22 in tenths of a pound. Legacy bit 4 is no longer emitted for active weight.
+
+The runtime register's readback and whole-lb field agree with a physical unloaded
+capture (1 lb while the base setting was 6 lb). Moving-cable validation is pending.
+The captured trainer reports the newer `0xb4` runtime stream. Its independent
+source variants 0/1/2 are decoded according to Cortex's field contract: the first
+payload word is force in tenths of a pound; the optional trailing word is target
+force. Real 21/25-byte capture fixtures verify this distinction (1.0–1.2 lb cable
+tension versus 6 lb target). An absent target or its `0xffff` sentinel clears the
+target cache. Matching target resistance to the trainer's dynamic on-screen value
+still requires physical validation. Native Twin variants and
+unidentified `0xaa94` batches are not interpreted. The existing telemetry rate was
+already 10 Hz, so this change does not alter the rate or training settings. Bounded USB diagnostics enqueue
+one raw notification per family and print from the worker without blocking BLE.
+Bridge v2 also reports the knob's display unit in optional flags. Weight Training
+reports kg, matching the knob's half-kg setpoint grid (59 raw lb → 27 kg); Band,
+Damper and Isokinetic follow the unit read from VOLTRA. The active-weight field uses
+tenths of a pound on the wire, independent of the display preference. USB diagnostics
+include unit, measured force, target, runtime weight, and sample ages.
 
 Protocol definitions are in `src/tv/bridge_protocol.h` and the public `android-voltra`
-library's `docs/knob-bridge.md`. Host protocol/UI tests and compilation are available;
-real Google TV pairing, simultaneous trainer connection and control/readback still
-need physical validation. This development firmware has not been flashed or packaged
-as a release as part of this integration.
+library's `docs/knob-bridge.md`. Host tests and compilation pass. The development
+firmware has been flashed and real Google TV PIN pairing, authenticated bridge
+telemetry and simultaneous trainer connection pass. The TV receives trainer
+battery, mode and set weight. TV-issued setting changes and native Twin through
+the bridge still need physical validation. This firmware has not been packaged
+as a release.
 
 ## USB programming
 
@@ -121,4 +215,21 @@ Microphone audio normally stays on-device without recording. Running `tools/capt
 
 ### Knob battery indicator
 
-A battery icon and estimated percentage stay at the top of every page. The reading uses the knob’s GPIO6 voltage divider, averaged and smoothed independently of the trainer battery. `--%` means the voltage is unavailable, invalid, or elevated by external power. This is a voltage estimate (3.2–4.2 V), not a fuel gauge; USB power and load affect accuracy. No charging status is inferred. Pin/divider reference: [Guition board configuration](https://github.com/MichalZaniewicz/esphome-guition-jc3636k718c-va/blob/main/base/core.yaml).
+A battery icon and estimated percentage stay at the top of every page. When a USB host is detected, a lightning bolt inside the battery replaces the percentage on both the knob and TV. Detection uses the ESP32-S3 USB controller's SOF activity and does not require an open serial monitor. It means USB power is connected, not that battery charging or charge completion was measured. This board exposes no charge-status input or fuel gauge, so charge-only adapters and wireless chargers cannot be detected reliably.
+
+The percentage uses the knob’s GPIO6 voltage divider, averaged and smoothed independently of the trainer battery. `--%` means voltage is unavailable, invalid, or elevated by external power without a detected USB host. Unknown voltage never implies charging. This is a voltage estimate (3.2–4.2 V), not a fuel gauge; power and load affect accuracy. Pin/divider reference: [Guition board configuration](https://github.com/MichalZaniewicz/esphome-guition-jc3636k718c-va/blob/main/base/core.yaml).
+
+Native Twin protocol/gate tests, bridge tests and rendered UI checks pass, and the
+ESP32 firmware compiles. The matching direct TV connector has passed an unloaded
+physical pair/exit/reconnect cycle. Knob/TV pairing and a simultaneous trainer
+connection now pass on hardware; native Twin control through the knob remains
+unverified.
+
+The October 13 v2 firmware was flashed with a full device backup. Hardware boot
+verification caught and fixed the GATT-service/scanning startup order; the corrected
+build boots and discovers both trainers. A second reproduced crash during TV
+connection was fixed by pausing trainer discovery before advertising and throughout
+the TV link. Authenticated TV-to-knob pairing and telemetry now pass, including
+connecting the selected trainer while the TV stays connected. The TV displayed
+trainer battery, mode and set weight without a restart during the check. Native
+Twin operation through this firmware remains pending physical confirmation.

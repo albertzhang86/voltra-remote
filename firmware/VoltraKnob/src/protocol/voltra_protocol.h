@@ -19,6 +19,9 @@ constexpr const char* DEVICE_NAME_PREFIX = frames::DEVICE_NAME_PREFIX;
 Frame authFrame();                 // custom "Voltra Knob" identity
 Frame authFrameFallback();         // SDK's iPhone identity, used if the custom one is rejected
 Frame telemetrySubscribeAllFrame();
+Frame readRuntimeWireWeightFrame();
+Frame readTelemetryRateFrame();
+Frame readTelemetrySubscriptionFrame();
 Frame readWeightUnitFrame();
 Frame readSettingsFrame();
 // Caller supplies 19 bytes; Band maximum is uint16 lb, range 15..200.
@@ -52,6 +55,9 @@ struct Event {
   EventType type = EventType::Unknown;
   int weightLbs = -1;   // Settings
   int weightUnitRaw = -1;
+  int telemetryRateHz = -1;
+  bool hasTelemetrySubscription = false;
+  uint32_t telemetrySubscription = 0;
   int twinConnection=-1,twinLastRole=-1,twinMainForce=-1,twinSubForce=-1,twinTotalForce=-1;
   int cableScreenId=-1;
   int lengthUnitRaw=-1,cableCm=-1,cableOffsetCm=-1;
@@ -67,6 +73,10 @@ struct Event {
   int guidedCtrl = -1;        // Settings: 53c9 register
   int battery = -1;     // Battery, 0..100
   int activeWeightTenths = -1; // Live cable force in tenths of a pound; never set weight.
+  bool hasTargetForceReport = false; // B4 report, including an absent/invalid target.
+  int targetForceTenths = -1; // Device target resistance, independent of measured cable force.
+  bool hasRuntimeWeight = false;
+  int runtimeWeightLbs = 0; // Signed whole-lb device runtime register 0x3e83.
   int phase = -1;       // Telemetry: 0 idle, 1 concentric, 2 hold, 3 eccentric
   int repCount = -1;    // PerRep, SetSummary
   int setCounter = -1;  // PerRep

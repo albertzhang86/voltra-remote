@@ -11,7 +11,9 @@ void setup(){
  vTaskPrioritySet(nullptr,6);
  Serial.setTxBufferSize(2048);Serial.begin(115200);Serial.setTxTimeoutMs(0);delay(100);Serial.println("[boot] Guition Voltra Remote / kg / two trainers");
  if(!board::begin()){Serial.println("[error] Board initialization failed; BLE disabled");while(true)delay(1000);}
- vlink::voltraLink.begin();ui::begin();tvbridge::begin();voice::begin();Serial.println("[ready] Display initialized; scanning for two Voltras");
+ // Register the TV peripheral before the central worker starts scanning.
+ // NimBLE cannot reset its GATT database while discovery is active.
+ vlink::voltraLink.begin();ui::begin();tvbridge::begin();vlink::voltraLink.start();voice::begin();Serial.println("[ready] Display initialized; scanning for two Voltras");
 }
 void loop(){
  static uint32_t previousLoop=0,maxLoopGap=0,loops=0;
@@ -29,6 +31,9 @@ void loop(){
    lastLog=millis();Serial.printf("[loop] count=%lu maxGapMs=%lu windowGapMs=%lu slowLoops=%lu uiMaxUs=%lu renderMaxUs=%lu\n",(unsigned long)loops,(unsigned long)maxLoopGap,(unsigned long)windowGap,(unsigned long)slowLoops,(unsigned long)uiMaxUs,(unsigned long)renderMaxUs);windowGap=uiMaxUs=renderMaxUs=slowLoops=0;board::logInputs();voice::logStatus();Serial.printf("[ui] selecting=%d\n",ui::selectingTrainer());const auto s=vlink::voltraLink.state();
    Serial.printf("[unload] touch=%lu voice=%lu other=%lu lastRequestMs=%lu requestSession=%lu stopWrites=%lu lastStopMs=%lu\n",(unsigned long)s.unloadTouchRequests,(unsigned long)s.unloadVoiceRequests,(unsigned long)s.unloadOtherRequests,(unsigned long)s.lastUnloadRequestMs,(unsigned long)s.lastUnloadRequestSession,(unsigned long)s.stopFramesSent,(unsigned long)s.lastStopFrameMs);
    Serial.printf("[twin] connection=%d savedRole=%d main=%d sub=%d total=%d\n",s.twinConnection,s.twinLastRole,s.twinMainForce,s.twinSubForce,s.twinTotalForce);
+   Serial.printf("[telemetry] unit=%d forceTenthsLb=%d forceAgeMs=%ld repAgeMs=%ld\n",s.weightUnitRaw,s.activeWeightTenths,s.forceMs?static_cast<long>(millis()-s.forceMs):-1L,s.repMs?static_cast<long>(millis()-s.repMs):-1L);
+   Serial.printf("[target-weight] tenthsLb=%d ageMs=%ld activeTenthsLb=%d source=%u\n",s.targetForceTenths,s.targetForceMs?static_cast<long>(millis()-s.targetForceMs):-1L,vlink::activeWeightReading(s,millis()).tenthsLb,static_cast<unsigned>(vlink::activeWeightReading(s,millis()).source));
+   Serial.printf("[runtime-weight] lbs=%d ageMs=%ld\n",s.runtimeWeightLbs,s.runtimeWeightMs?static_cast<long>(millis()-s.runtimeWeightMs):-1L);
    Serial.printf("[status] link=%u selected=%d trainer1=%s trainer2=%s weightLb=%d chainsLb=%d inverseEnabled=%d eccLb=%d mode=%d fitness=%d screen=%d cable=%d offset=%d lengthUnit=%d cableActive=%d heap=%u\n",static_cast<unsigned>(s.link),s.selected,s.trainers[0].address,s.trainers[1].address,s.weightLbs,s.chainsLbs,s.inverseChainsEnabled,s.eccentricLbs,s.mode,s.fitnessMode,s.cableScreenId,s.cableCm,s.cableOffsetCm,s.lengthUnitRaw,s.cableActive,static_cast<unsigned>(ESP.getFreeHeap()));
  }
  delay(5);

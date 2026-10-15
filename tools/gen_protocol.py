@@ -115,6 +115,9 @@ lines.append(arr("GUIDED_LOAD_TRIGGER", vendor_frame(b"\x12").hex()))
 lines.append(arr("READ_GUIDED_LOAD_STATUS", param_read_frame([b"\x8d\x53", b"\xc7\x53", b"\xc8\x53", b"\xc9\x53"]).hex()))
 # base weight 863e, fitness mode 893e (4 = ready, 5 = motor engaged), training mode b04f
 lines.append(arr("READ_SETTINGS", param_read_frame([b"\x86\x3e", b"\x87\x3e", b"\x88\x3e", b"\x89\x3e", b"\xb0\x4f", b"\xb0\x53"]).hex()))
+lines.append(arr("READ_RUNTIME_WIRE_WEIGHT", param_read_frame([b"\x83\x3e"]).hex()))
+lines.append(arr("READ_TELEMETRY_RATE", param_read_frame([b"\x82\x51"]).hex()))
+lines.append(arr("READ_TELEMETRY_SUBSCRIPTION", param_read_frame([b"\x83\x51"]).hex()))
 lines.append(arr("READ_WEIGHT_UNIT", param_read_frame([b"\x6e\x50"]).hex()))
 lines.append(arr("READ_LENGTH_UNIT", param_read_frame([b"\x6f\x50"]).hex()))
 # Read-only Twin diagnostics: connection, saved role, and main/sub/total force.
