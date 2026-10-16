@@ -354,16 +354,19 @@ void begin(){
  lv_obj_add_flag(cablePanel,LV_OBJ_FLAG_HIDDEN);
  modePanel=lv_obj_create(screen);lv_obj_set_size(modePanel,360,360);lv_obj_center(modePanel);
  setBgColor(modePanel,color(theme::Background),0);lv_obj_set_style_border_width(modePanel,0,0);lv_obj_set_style_pad_all(modePanel,0,0);lv_obj_remove_flag(modePanel,LV_OBJ_FLAG_SCROLLABLE);
+ // Leave a clear header below the persistent battery badge. Keep the 64px
+ // touch targets inside the round display and centered around the mode label.
+ constexpr int modeCenterY=182,modeRadius=112;
  for(int i=0;i<MODE_COUNT;++i){
   const double angle=(-90.0+i*360.0/MODE_COUNT)*3.141592653589793/180.0;
-  const int x=static_cast<int>(std::lround(122*std::cos(angle)));
-  const int y=174+static_cast<int>(std::lround(122*std::sin(angle)))-32;
+  const int x=static_cast<int>(std::lround(modeRadius*std::cos(angle)));
+  const int y=modeCenterY+static_cast<int>(std::lround(modeRadius*std::sin(angle)))-32;
   modeIcons[i]=button(modePanel,64,64,x,y,theme::Surface);lv_obj_set_style_radius(modeIcons[i],LV_RADIUS_CIRCLE,0);
   lv_obj_set_style_pad_all(modeIcons[i],0,0);lv_obj_remove_flag(modeIcons[i],LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_add_event_cb(modeIcons[i],iconDraw,LV_EVENT_DRAW_MAIN,reinterpret_cast<void*>(static_cast<intptr_t>(i)));
   lv_obj_add_event_cb(modeIcons[i],selectMode,LV_EVENT_CLICKED,reinterpret_cast<void*>(static_cast<intptr_t>(i)));
  }
- modeCenter=button(modePanel,112,112,0,118,theme::SurfaceLow);lv_obj_set_style_radius(modeCenter,LV_RADIUS_CIRCLE,0);lv_obj_set_style_border_width(modeCenter,2,0);
+ modeCenter=button(modePanel,112,112,0,modeCenterY-56,theme::SurfaceLow);lv_obj_set_style_radius(modeCenter,LV_RADIUS_CIRCLE,0);lv_obj_set_style_border_width(modeCenter,2,0);
  // Center the icon + 4px gap + actual label height as one group. The label's
  // center is 20px below the group's center for either one or two text lines.
  modeName=label(modeCenter,"Weight\nTraining",0,0,&font_inter_14);lv_obj_set_width(modeName,102);lv_obj_set_style_text_align(modeName,LV_TEXT_ALIGN_CENTER,0);lv_obj_align(modeName,LV_ALIGN_CENTER,0,20);
