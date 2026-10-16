@@ -6,6 +6,8 @@ SRC=firmware/VoltraKnob/src
 CXX="clang++ -std=c++17 -Wall -Wextra -I$SRC -Itest"
 $CXX test/test_protocol.cpp $SRC/protocol/voltra_protocol.cpp -o build/host/test_protocol
 build/host/test_protocol
+$CXX test/test_frame_assembler.cpp $SRC/protocol/voltra_protocol.cpp -o build/host/test_frame_assembler
+build/host/test_frame_assembler
 if [ -f test/test_app_logic.cpp ]; then
   $CXX test/test_app_logic.cpp $SRC/app/app_logic.cpp -o build/host/test_app_logic
   build/host/test_app_logic

@@ -196,9 +196,20 @@ inline bool canForgetTrainer(const DeviceState& s,int slot,uint32_t now){
  if(slot<0||slot>=2||!s.trainers[slot].address[0])return false;
  return canSwitch(s,now)&&!s.loaded&&!s.armed&&!s.parameterSelectionPending;
 }
-inline bool canChangeTwin(const DeviceState& s,uint32_t now,bool create){
- if(s.twinPending||s.parameterSelectionPending||s.cableActive||!fresh(s,now)||!endpointFresh(s,now)||s.mode!=0||!voltra::fitnessModeUnloaded(s.fitnessMode))return false;
+// Admission permits an unloaded training screen. The transaction confirms idle
+// on both identified trainers before issuing the native pairing command.
+// Once the peer has a live GATT connection, its identity/readbacks replace the
+// advertisement that necessarily disappears during that connection.
+inline bool twinSetupReady(const DeviceState& s,uint32_t now){
+ if(s.selected<0||s.selected>=2||!s.trainers[s.selected].address[0])return false;
+ if(s.twinPending||s.parameterSelectionPending||s.cableActive||s.loaded||s.armed||!fresh(s,now)||!endpointFresh(s,now))return false;
+ if(strcasecmp(s.trainers[s.selected].address,s.endpoint.local))return false;
+ if((s.mode!=0&&!voltra::supportedMode(s.mode))||!voltra::fitnessModeUnloaded(s.fitnessMode))return false;
  if(s.controlBusyUntil&&static_cast<int32_t>(s.controlBusyUntil-now)>0)return false;
+ return true;
+}
+inline bool canChangeTwin(const DeviceState& s,uint32_t now,bool create){
+ if(!twinSetupReady(s,now))return false;
  if(!create)return s.endpoint.paired();
  return s.endpoint.independent()&&nearbyTwinPeer(s,now);
 }

@@ -46,9 +46,10 @@ Trainer discovery pauses before TV advertising starts and stays
 paused while listening for a trusted TV or while the TV link is active. Saved trainers remain
 selectable as **Saved · Reconnect**; their connection and fresh endpoint state still
 have to be verified before controls are enabled. A saved identity is not labeled
-nearby without a recent advertisement or a fresh active connection. Disconnect the
-TV, swipe right on trainer selection, then use **Find nearby trainers** for a
-30-second discovery window.
+nearby without a recent advertisement or a fresh active connection. When no TV is
+connected or pairing, tapping the trainer name to open selection starts a
+30-second discovery window. To search again, swipe right and use **Find nearby
+trainers**. An active TV connection must first be disconnected.
 This avoids a reproduced ESP32 Bluetooth scheduler assertion (`sch_arb.c:517`)
 when the TV connects during scanning. A
 [related Espressif report](https://github.com/espressif/esp-idf/issues/18063)
@@ -56,14 +57,25 @@ describes the same assertion with concurrent peripheral connections and scanning
 the local crash log established this knob's failure. After the fix, the physical
 Google TV completed PIN pairing and authenticated, encrypted bridge telemetry.
 
-Select the intended controller, finish training on both machines (idle mode), then
-open trainer selection and choose **Create Twin**. This action appears only when
-exactly two distinct trainers are nearby and one is connected. A new peer can be
-saved in a free slot; occupied saved slots are never replaced. The knob temporarily connects
-to the second nearby trainer, checks both are unloaded, and sends the controller's
-address to that peer. Success requires acknowledgment plus matching native endpoint
+Select the intended controller, unload both machines, then open trainer selection
+and choose **Create Twin**. Pairing is enabled when exactly two distinct trainers
+are nearby and one is connected. A remembered peer keeps the action visible when
+unavailable, with a disabled button and a status message. A new peer can be saved
+in a free slot; occupied saved slots are never replaced.
+
+The knob temporarily connects to the second trainer, verifies both identities and
+unloaded states, enters idle on both, and sends the controller's address to the
+peer. Weight Training, Resistance Band, Damper and Isokinetic can all start this
+flow while unloaded. Success requires acknowledgment plus matching native endpoint
 identities. **Exit Twin** confirms independent status and keeps the selected
-controller connected. Neither action is replayed after a disconnect.
+controller connected. The previous controller mode is restored only after the
+topology change is confirmed; a failed restoration prompts choosing a mode.
+Neither action loads/unloads a trainer or replays after a disconnect.
+
+Bluetooth replies may span several notifications after a Twin change. Controller
+and temporary-peer packets are assembled separately, checked against both packet
+checksums, and discarded if incomplete for a second or if their connection changes.
+Only complete packets update trainer state or confirm a command.
 
 Existing Twin controllers are recognized from the endpoint message, with both
 batteries and the actual peer identity. Stale or unknown topology blocks controls.
@@ -102,8 +114,9 @@ The TV does not automatically reconnect after an explicit disconnect.
 
 Trusted TV advertising pauses trainer discovery to avoid the reproduced Bluetooth
 scheduler crash. Saved trainer identities remain selectable after reboot; fresh
-connection/readback is still required before control. To discover trainers, first
-disconnect the TV, then swipe right on trainer selection and choose **Find nearby trainers**. TV listening resumes
+connection/readback is still required before control. Opening trainer selection
+from controls starts discovery when no TV is connected or pairing; **Find nearby
+trainers** on the connections page starts another window. TV listening resumes
 after 30 seconds. Build/setup apply `tools/patch_nimble.py` to pinned NimBLE 2.5.1,
 adding an application repeat-pairing callback. Replacement of a saved bond is
 rejected outside an explicit pairing window, before the old bond is deleted.
@@ -125,7 +138,8 @@ The TV follows the knob's selected trainer and can request the four mode/setting
 changes; the existing knob command gates and trainer confirmation remain authoritative.
 Local draft edits block TV changes. The bridge cannot load/unload, select a trainer,
 or start training. Bridge v2 supports Create/Exit Twin with verified roles and both
-batteries; its pair/exit request requires idle mode. Twin live force/reps are withheld
+batteries; its pair/exit request requires unloaded trainers and confirms idle before
+changing topology. Twin live force/reps are withheld
 until validated from hardware, rather than doubling a single cable reading.
 Expired commands or commands for an old trainer/TV connection are rejected.
 The primary number shows the configured setting at rest, including loaded without
@@ -242,8 +256,9 @@ The percentage uses the knob’s GPIO6 voltage divider, averaged and smoothed in
 Native Twin protocol/gate tests, bridge tests and rendered UI checks pass, and the
 ESP32 firmware compiles. The matching direct TV connector has passed an unloaded
 physical pair/exit/reconnect cycle. Knob/TV pairing and a simultaneous trainer
-connection now pass on hardware; native Twin control through the knob remains
-unverified.
+connection also pass on hardware. The October 15 knob build passed a physical
+Create Twin / Exit Twin cycle, restoring Weight Training after both transitions.
+Other training modes and role reversals remain outside that physical check.
 
 The October 13 v2 firmware was flashed with a full device backup. Hardware boot
 verification caught and fixed the GATT-service/scanning startup order; the corrected
@@ -251,5 +266,4 @@ build boots and discovers both trainers. A second reproduced crash during TV
 connection was fixed by pausing trainer discovery before advertising and throughout
 the TV link. Authenticated TV-to-knob pairing and telemetry now pass, including
 connecting the selected trainer while the TV stays connected. The TV displayed
-trainer battery, mode and set weight without a restart during the check. Native
-Twin operation through this firmware remains pending physical confirmation.
+trainer battery, mode and set weight without a restart during the check.

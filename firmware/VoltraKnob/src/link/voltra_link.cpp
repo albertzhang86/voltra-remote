@@ -1,4 +1,5 @@
 #include "voltra_link.h"
+#include "twin_transaction.h"
 #include <Arduino.h>
 #include <NimBLEDevice.h>
 #include <Preferences.h>
@@ -6,6 +7,7 @@
 #include <cstring>
 #include <functional>
 #include "../protocol/voltra_protocol.h"
+#include "../protocol/frame_assembler.h"
 namespace vlink {
 VoltraLink voltraLink;
 namespace {
@@ -49,6 +51,11 @@ std::atomic<bool> discoveryVisible{true};
 std::atomic<uint32_t> tvEpoch{0};
 NimBLEClient* client=nullptr;
 NimBLERemoteCharacteristic* writer=nullptr;
+// Notifications can be split into 20-byte chunks after a native Twin change.
+// These buffers and subscription identities are protected by the state mutex.
+voltra::FrameAssembler controllerFrames,peerFrames;
+NimBLERemoteCharacteristic* controllerUpdates=nullptr;
+NimBLERemoteCharacteristic* peerUpdates=nullptr;
 uint32_t workerSession=0;
 uint32_t workerTvEpoch=0,workerTvDeadline=0;
 int workerSlot=-1;
@@ -60,6 +67,7 @@ int diagnosticReplies=0;
 uint16_t twinSequence=0,expectedTwinSequence=0;
 uint8_t expectedTwinOperation=0;
 bool twinAcknowledged=false;
+uint32_t twinDeadline=0;
 void message(const char* text){Lock lock;strlcpy(current.message,text,sizeof(current.message));}
 // Serialize scan start/stop with the TV's transition into advertising. Setting a
 // flag alone leaves a race where the worker restarts scanning just before pairing.
@@ -72,6 +80,8 @@ void updateDiscovery(bool requested){
 }
 bool sameSession(){Lock lock;return current.session==workerSession && current.selected==workerSlot;}
 void resetReadings(){
+  controllerUpdates=nullptr;controllerFrames.reset();
+  peerUpdates=nullptr;peerFrames.reset();
   for(int i=0;i<voltra::MODE_PARAMETER_COUNT;++i){current.modeValues[i]=0;current.modeValueMs[i]=0;}
   current.endpoint={};current.endpointMs=0;current.twinPending=false;
   diagnosticReplies=0;current.twinMs=0;current.twinRoleMs=0;
@@ -116,20 +126,21 @@ class ScanCallbacks:public NimBLEScanCallbacks {
  }
 } scanCallbacks;
 class ClientCallbacks:public NimBLEClientCallbacks {
- void onDisconnect(NimBLEClient*,int) override {disconnected=true;}
+ void onDisconnect(NimBLEClient*,int) override {
+  Lock lock;disconnected=true;controllerUpdates=nullptr;controllerFrames.reset();
+  peerUpdates=nullptr;peerFrames.reset();
+ }
 } clientCallbacks;
-void notify(NimBLERemoteCharacteristic*,uint8_t* bytes,size_t size,bool){
-  const bool valid=voltra::validFrame(bytes,size);
-  {Lock lock;if(current.session==workerSession)captureDiagnostic(bytes,size,valid);}
-  if(!valid)return;
+// Called only by the assembler while the state mutex is held. A partial packet
+// cannot update freshness, acknowledge a command, or publish trainer readings.
+void applyControllerFrame(const uint8_t* bytes,size_t size){
+  captureDiagnostic(bytes,size,true);
   const auto e=voltra::decode(bytes,size);
   if(size>=14&&bytes[10]==0x0f&&diagnosticReplies<16&&Serial.availableForWrite()>=240){
     if(e.type==voltra::EventType::Unknown||e.twinLastRole>=0||(size>=16&&bytes[14]==0x38&&bytes[15]==0x54)||bytes[11]!=0){
       ++diagnosticReplies;Serial.printf("[twin-reply] ");for(size_t i=0;i<size&&i<64;++i)Serial.printf("%02x",bytes[i]);Serial.println();
     }
   }
-  Lock lock;
-  if(current.session!=workerSession)return;
   const uint32_t now=millis();
   const auto endpoint=voltra::decodeEndpoint(bytes,size);
   if(endpoint.valid&&current.selected>=0&&!strcasecmp(endpoint.local,current.trainers[current.selected].address)){
@@ -183,6 +194,12 @@ void notify(NimBLERemoteCharacteristic*,uint8_t* bytes,size_t size,bool){
   if(e.repCount>=0&&!current.endpoint.paired()){current.reps=e.repCount;current.repMs=now;}
   updateWeightTelemetry(current,e,now);
 }
+void notify(uint32_t session,NimBLERemoteCharacteristic* source,uint8_t* bytes,size_t size){
+  Lock lock;
+  if(source!=controllerUpdates||!controllerUpdates||disconnected||
+     current.session!=session||workerSession!=session||current.selected!=workerSlot)return;
+  controllerFrames.feed(bytes,size,millis(),applyControllerFrame);
+}
 bool send(voltra::Frame frame){
   if(!sameSession()||disconnected||!writer||!client->isConnected())return false;
   if(workerTvEpoch&&frame.len>10&&frame.data[10]==0x11&&
@@ -203,7 +220,11 @@ bool connect(){
   auto* service=client->getService(voltra::SERVICE_UUID);if(!service)return false;
   writer=service->getCharacteristic(voltra::WRITE_CHAR_UUID);
   auto* updates=service->getCharacteristic(voltra::NOTIFY_CHAR_UUID);
-  if(!writer||!updates||!updates->subscribe(true,notify))return false;
+  {Lock lock;controllerFrames.reset();controllerUpdates=updates;}
+  const uint32_t session=workerSession;
+  if(!writer||!updates||!updates->subscribe(true,[session](NimBLERemoteCharacteristic* source,uint8_t* bytes,size_t size,bool){
+    notify(session,source,bytes,size);
+  }))return false;
   {Lock lock;current.link=LinkState::Handshaking;}
   message("Accept on Voltra screen");
   if(!send(voltra::authFrame()))return false;
@@ -224,73 +245,193 @@ bool connect(){
 }
 // Pairing uses a short-lived second GATT client. The normal controller session
 // remains authoritative and its verified endpoint report confirms the result.
-struct PeerReadings {voltra::EndpointStatus endpoint;int mode=-1,fitness=-1;uint32_t endpointAt=0,statusAt=0;bool ack=false;};
+struct PeerReadings: TwinParticipant {bool ack=false;};
 PeerReadings peerReadings;
-void peerNotify(NimBLERemoteCharacteristic*,uint8_t* bytes,size_t size,bool){
-  if(!voltra::validFrame(bytes,size))return;
+TwinParticipant controllerReadings(){
+  Lock lock;return {current.endpoint,current.mode,current.fitnessMode,current.endpointMs,current.statusMs};
+}
+PeerReadings readPeer(){Lock lock;return peerReadings;}
+// Peer fragments must never be joined with controller fragments or survive the
+// temporary peer connection. The callback caller owns the state mutex.
+void applyPeerFrame(const uint8_t* bytes,size_t size){
   const auto e=voltra::decode(bytes,size);const auto endpoint=voltra::decodeEndpoint(bytes,size);
-  Lock lock;const uint32_t now=millis();
+  const uint32_t now=millis();
   if(endpoint.valid){peerReadings.endpoint=endpoint;peerReadings.endpointAt=now;}
   if(e.mode>=0)peerReadings.mode=e.mode;
   if(e.fitnessMode>=0){peerReadings.fitness=e.fitnessMode;peerReadings.statusAt=now;}
   if(voltra::twinReply(bytes,size,expectedTwinSequence,1))peerReadings.ack=true;
 }
+void peerNotify(uint32_t session,uint16_t sequence,NimBLERemoteCharacteristic* source,uint8_t* bytes,size_t size){
+  Lock lock;
+  if(source!=peerUpdates||!peerUpdates||disconnected||expectedTwinOperation!=1||
+     expectedTwinSequence!=sequence||current.session!=session||workerSession!=session||
+     current.selected!=workerSlot)return;
+  peerFrames.feed(bytes,size,millis(),applyPeerFrame);
+}
 bool twinSessionValid(){
-  return sameSession()&&!disconnected&&!stopRequested&&(!workerTvEpoch||workerTvEpoch==tvEpoch.load());
+  return sameSession()&&!disconnected&&!stopRequested&&(!workerTvEpoch||workerTvEpoch==tvEpoch.load())&&
+    (!twinDeadline||static_cast<int32_t>(twinDeadline-millis())>0);
 }
 void pollTwinController(){uint8_t bytes[13];send(voltra::endpointFrame(bytes));send(voltra::readSettingsFrame());}
 bool waitTwin(uint32_t timeout,const std::function<bool()>& complete){
   const uint32_t start=millis();uint32_t poll=0;
   while(twinSessionValid()&&millis()-start<timeout){
     if(!poll||millis()-poll>=500){poll=millis();pollTwinController();}
-    if(complete())return true;
+    // BLE writes can block. A readback received during that wait cannot revive
+    // a cancelled or expired transaction, even if it would satisfy the predicate.
+    if(!twinSessionValid()||millis()-start>=timeout)return false;
+    if(complete())return twinSessionValid()&&millis()-start<timeout;
     vTaskDelay(pdMS_TO_TICKS(25));
   }
   return false;
 }
 bool performTwin(bool create){
   auto s=voltraLink.state();s.twinPending=false;s.controlBusyUntil=0;
-  if(!canChangeTwin(s,millis(),create))return false;
+  auto fail=[&](const char* reason){if(sameSession())message(reason);return false;};
+  if(!canChangeTwin(s,millis(),create))return fail("Twin unavailable; check trainer state");
+  // The TV's two-second deadline applies to dispatch, not the authenticated
+  // second-device handshake. The accepted operation remains bounded and is
+  // cancelled immediately when its trainer session or TV epoch changes.
+  twinDeadline=millis()+40000;
+  if(workerTvEpoch)workerTvDeadline=twinDeadline;
+  const int previousMode=s.mode;
+  const Trainer controller=s.trainers[s.selected];
   const uint16_t sequence=++twinSequence;
-  {Lock lock;expectedTwinSequence=sequence;expectedTwinOperation=create?1:2;twinAcknowledged=false;peerReadings={};}
+  {Lock lock;expectedTwinSequence=sequence;expectedTwinOperation=create?1:2;twinAcknowledged=false;
+    peerUpdates=nullptr;peerFrames.reset();peerReadings={};}
+  auto controllerReady=[&]{
+    auto latest=voltraLink.state();latest.twinPending=false;latest.controlBusyUntil=0;
+    return twinSessionValid()&&twinSetupReady(latest,millis())&&
+      !strcasecmp(latest.endpoint.local,controller.address);
+  };
+  auto controllerIdle=[&](const std::function<bool()>& peerStillReady){
+    const auto before=controllerReadings();
+    if(!controllerReady()||!twinParticipantUnloaded(before,controller.address,millis()))return false;
+    if(create?!before.endpoint.independent():
+       (!before.endpoint.paired()||strcasecmp(before.endpoint.peer,s.endpoint.peer)))return false;
+    if(before.mode==0)return true;
+    if(!twinSessionValid()||!send(voltra::modeIdleFrame()))return false;
+    return waitTwin(3000,[&]{
+      if(peerStillReady&&!peerStillReady())return false;
+      if(!twinSessionValid())return false;
+      const auto latest=controllerReadings();
+      return latest.statusAt!=before.statusAt&&twinParticipantIdle(latest,controller.address,millis());
+    });
+  };
+  auto finish=[&](const char* success,const char* needsMode){
+    if(!sameSession())return false;
+    if(previousMode==0){message(success);return true;}
+    voltra::Frame frame;
+    const auto before=controllerReadings();
+    const bool sameTopology=create?
+      (before.endpoint.paired()&&!strcasecmp(before.endpoint.peer,s.trainers[1-s.selected].address)):
+      before.endpoint.independent();
+    if(!sameTopology||!controllerReady()||!twinParticipantIdle(before,controller.address,millis())||
+       !voltra::modeFrame(previousMode,frame)||!send(frame)){
+      if(sameSession())message(needsMode);return true;
+    }
+    const bool restored=waitTwin(3000,[&]{
+      const auto latest=controllerReadings();
+      return latest.statusAt!=before.statusAt&&latest.mode==previousMode&&
+        twinParticipantUnloaded(latest,controller.address,millis());
+    });
+    if(sameSession())message(restored?success:needsMode);return true;
+  };
   if(!create){
+    if(!controllerIdle({}))return fail("Finish training before exiting Twin");
+    const auto before=controllerReadings();
+    if(!controllerReady()||!twinParticipantIdle(before,controller.address,millis())||
+       !before.endpoint.paired()||strcasecmp(before.endpoint.peer,s.endpoint.peer))
+      return fail("Twin connection changed; try again");
     uint8_t bytes[20];voltra::Frame frame;
-    if(!voltra::twinFrame(2,s.endpoint.peer,sequence,bytes,frame)||!send(frame))return false;
-    return waitTwin(15000,[&]{Lock lock;return twinAcknowledged&&current.endpointMs!=s.endpointMs&&current.endpoint.independent();});
+    if(!twinSessionValid()||!voltra::twinFrame(2,s.endpoint.peer,sequence,bytes,frame)||!send(frame))
+      return fail("Exit Twin could not be sent");
+    const bool exited=waitTwin(15000,[&]{
+      bool ack;{Lock lock;ack=twinAcknowledged;}
+      return twinExitConfirmed(ack,controllerReadings(),controller.address,before.endpointAt,millis());
+    });
+    if(!exited)return fail("Exit Twin not confirmed; check trainers");
+    return finish("Twin exited","Twin exited; choose training mode");
   }
   const Trainer peer=s.trainers[1-s.selected];
   NimBLEDevice::getScan()->stop();
   auto* connection=NimBLEDevice::createClient();
-  if(!connection)return false;
+  if(!connection)return fail("No Bluetooth slot for second trainer");
   connection->setConnectTimeout(5000);
-  auto cleanup=[&]{if(connection->isConnected())connection->disconnect();NimBLEDevice::deleteClient(connection);};
-  if(!connection->connect(NimBLEAddress(std::string(peer.address),peer.addressType))){cleanup();return false;}
+  auto cleanup=[&]{
+    {Lock lock;peerUpdates=nullptr;peerFrames.reset();}
+    if(connection->isConnected())connection->disconnect();
+    NimBLEDevice::deleteClient(connection);
+  };
+  if(!connection->connect(NimBLEAddress(std::string(peer.address),peer.addressType))){cleanup();return fail("Second trainer unavailable; close other app");}
   auto* service=connection->getService(voltra::SERVICE_UUID);
   auto* writes=service?service->getCharacteristic(voltra::WRITE_CHAR_UUID):nullptr;
   auto* events=service?service->getCharacteristic(voltra::NOTIFY_CHAR_UUID):nullptr;
-  if(!writes||!events||!events->subscribe(true,peerNotify)){cleanup();return false;}
+  {Lock lock;peerFrames.reset();peerUpdates=events;}
+  const uint32_t session=workerSession;
+  if(!writes||!events||!events->subscribe(true,[session,sequence](NimBLERemoteCharacteristic* source,uint8_t* bytes,size_t size,bool){
+    peerNotify(session,sequence,source,bytes,size);
+  })){cleanup();return fail("Second trainer service unavailable");}
   auto writePeer=[&](voltra::Frame frame){return twinSessionValid()&&connection->isConnected()&&writes->writeValue(frame.data,frame.len,writes->canWrite());};
-  if(!writePeer(voltra::authFrame())){cleanup();return false;}
+  if(!writePeer(voltra::authFrame())){cleanup();return fail("Second trainer handshake failed");}
+  message("Accept on second VOLTRA if prompted");
   // Keep controller status fresh during the peer's read-only handshake.
   waitTwin(3000,[]{return false;});
-  for(size_t i=0;i<voltra::INIT_COUNT;++i){if(!writePeer(voltra::initFrame(i))){cleanup();return false;}}
+  for(size_t i=0;i<voltra::INIT_COUNT;++i){
+    if(!writePeer(voltra::initFrame(i))){cleanup();return fail("Second trainer handshake failed");}
+    vTaskDelay(pdMS_TO_TICKS(25));
+  }
   uint32_t poll=0;
-  const bool peerReady=waitTwin(12000,[&]{
+  auto pollPeer=[&]{
     if(!poll||millis()-poll>=500){poll=millis();uint8_t bytes[13];writePeer(voltra::endpointFrame(bytes));writePeer(voltra::readSettingsFrame());}
-    Lock lock;
-    return peerReadings.endpoint.independent()&&!strcasecmp(peerReadings.endpoint.local,peer.address)&&
-      peerReadings.endpointAt&&millis()-peerReadings.endpointAt<3500&&peerReadings.statusAt&&millis()-peerReadings.statusAt<3500&&
-      peerReadings.mode==0&&voltra::fitnessModeUnloaded(peerReadings.fitness);
+  };
+  const bool peerReady=waitTwin(8000,[&]{
+    pollPeer();const auto latest=readPeer();
+    return latest.mode>=0&&twinParticipantFresh(latest,peer.address,millis());
   });
-  s=voltraLink.state();s.twinPending=false;s.controlBusyUntil=0;
-  if(peerReady){s.trainers[1-s.selected].seen=true;s.trainers[1-s.selected].lastSeenMs=millis();}
-  if(!peerReady||!canChangeTwin(s,millis(),true)){cleanup();return false;}
+  auto peerState=readPeer();
+  if(!peerReady){cleanup();return fail("Second trainer state unavailable");}
+  if(!peerState.endpoint.independent()){cleanup();return fail("Second trainer already in another Twin");}
+  if(peerState.mode!=0&&!voltra::supportedMode(peerState.mode)){
+    cleanup();return fail("Select a supported mode on second trainer");
+  }
+  if(!twinParticipantIndependent(peerState,peer.address,millis())){cleanup();return fail("Unload second trainer before Twin");}
+  // Both live identities and unloaded states are now known. Entering idle is
+  // necessary for native pairing, but must never be used as an implicit unload.
+  if(!controllerReady()||!twinParticipantIndependent(controllerReadings(),controller.address,millis())){
+    cleanup();return fail("Unload connected trainer before Twin");
+  }
+  message("Preparing both trainers for Twin");
+  if(!controllerIdle([&]{
+    pollPeer();
+    return twinSessionValid()&&twinParticipantIndependent(readPeer(),peer.address,millis());
+  })){cleanup();return fail("Trainer state changed while entering idle");}
+  pollPeer();peerState=readPeer();
+  if(!twinParticipantIndependent(peerState,peer.address,millis())){cleanup();return fail("Second trainer state changed; try again");}
+  if(peerState.mode!=0){
+    const uint32_t previousStatus=peerState.statusAt;
+    if(!writePeer(voltra::modeIdleFrame())){cleanup();return fail("Second trainer did not enter idle");}
+    const bool idle=waitTwin(3000,[&]{
+      pollPeer();const auto latest=readPeer();
+      return latest.statusAt!=previousStatus&&twinParticipantIndependent(latest,peer.address,millis())&&latest.mode==0;
+    });
+    if(!idle){cleanup();return fail("Second trainer did not enter idle");}
+  }
+  const auto before=controllerReadings();peerState=readPeer();
+  if(!controllerReady()||!twinParticipantIndependent(before,controller.address,millis())||before.mode!=0||
+     !twinParticipantIndependent(peerState,peer.address,millis())||peerState.mode!=0){
+    cleanup();return fail("Trainer state changed; Twin cancelled");
+  }
   uint8_t bytes[20];voltra::Frame frame;
   // Verified direction: future peer receives future controller's address.
-  const bool sent=voltra::twinFrame(1,s.endpoint.local,sequence,bytes,frame)&&writePeer(frame);
-  const bool paired=sent&&waitTwin(15000,[&]{Lock lock;return peerReadings.ack&&current.endpointMs!=s.endpointMs&&
-    current.endpoint.paired()&&!strcasecmp(current.endpoint.peer,peer.address);});
-  cleanup();return paired;
+  message("Creating Twin");
+  const bool sent=voltra::twinFrame(1,controller.address,sequence,bytes,frame)&&writePeer(frame);
+  const bool paired=sent&&waitTwin(15000,[&]{
+    return twinCreateConfirmed(readPeer().ack,controllerReadings(),controller.address,peer.address,before.endpointAt,millis());
+  });
+  cleanup();
+  if(!paired)return fail("Twin not confirmed; check both trainers");
+  return finish("Twin connected","Twin connected; choose training mode");
 }
 
 void pump(){
@@ -324,10 +465,11 @@ void pump(){
         message(command.value==1?"Checking second trainer":"Exiting Twin");
         if(Serial.availableForWrite()>=80)Serial.printf("[native-twin] request=%s\n",command.value==1?"create":"exit");
         const bool success=performTwin(command.value==1);
-        if(Serial.availableForWrite()>=80)Serial.printf("[native-twin] confirmed=%d\n",success);
-        {Lock lock;expectedTwinOperation=0;current.twinPending=false;current.controlBusyUntil=0;
-          current.twinSucceeded=success;++current.twinCompleted;
-          strlcpy(current.message,success?(command.value==1?"Twin connected":"Twin exited"):"Twin not confirmed",sizeof(current.message));}
+        const auto completed=voltraLink.state();
+        if(Serial.availableForWrite()>=140)Serial.printf("[native-twin] confirmed=%d mode=%d message=%s\n",success,completed.mode,completed.message);
+        {Lock lock;expectedTwinOperation=0;twinDeadline=0;
+          if(current.session==command.session){current.twinPending=false;current.controlBusyUntil=0;
+            current.twinSucceeded=success;++current.twinCompleted;}}
         continue;
       }
       if(command.type==CommandType::BandMaximum){

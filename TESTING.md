@@ -24,6 +24,30 @@ Repeat relevant checks for different firmware versions and Twin roles. Set Twin 
 
 The native LVGL UI harness (`python3 tools/preview.py`) also passed locally, including tap-number load, loaded weight edits, mode-menu navigation, connection session and trainer availability checks. It renders simulated screens and does not operate a physical trainer.
 
+## Native Twin regression checks
+
+Host tests cover admission from all four supported unloaded modes, loaded/armed
+rejection, peer identity and freshness, and acknowledgment plus matching endpoint
+confirmation. The native UI fixture covers nearby and remembered peers, disabled
+actions, rejected requests, and discovery on explicit selector opening. A trusted
+TV connection or pairing window must not be interrupted by opening selection.
+
+Packet-assembly tests replay captured telemetry, endpoint and settings layouts
+split at 20-byte boundaries, with synthetic device identities. They also cover
+coalesced packets, CRC/header corruption, bounded noise, connection resets,
+independent controller/peer buffers, partial-frame expiration and timer rollover.
+
+For hardware acceptance, start with both trainers independent and unloaded. Select
+the intended controller, open trainer selection, create Twin, and confirm the
+trainer screens and knob agree. Exit Twin and confirm independent state, then
+repeat from each supported mode. Check that the previous mode returns after a
+confirmed change, and that an unavailable or externally connected peer produces a
+clear failure without a success state. Repeat after reconnecting and with a saved
+TV bond but no TV connected. A physical Create/Exit cycle with Weight Training
+restored after both transitions passed on October 15. Other modes, role reversals,
+reconnect and unavailable-peer scenarios still need hardware coverage; host tests
+and a firmware build alone do not verify those Bluetooth transactions.
+
 ## Installer verification without hardware
 
 ```sh

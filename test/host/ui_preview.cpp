@@ -12,6 +12,8 @@ static uint32_t now=100;
 uint32_t millis(){return now;}
 static vlink::DeviceState device;
 static int loadCalls=0,unloadCalls=0;
+static int twinCalls=0;
+static bool rejectTwinRequest=false;
 static int flushCalls=0;
 static uint16_t framebuffer[360*360];
 static bool touching=false;
@@ -21,10 +23,10 @@ static int isoCalls=0,isoRequestedIndex=-1,isoRequestedValue=-1;
 static int rotation=0,settingCalls=0,bandCalls=0,bandRequested=-1,damperCalls=0,damperRequested=-1;
 namespace tvbridge {
 bool open=false,savedTv=false,tvConnected=false;
-int forgetCalls=0;
+int forgetCalls=0,findCalls=0;
 void openPairing(){open=true;} void disconnect(){open=false;}
 bool connected(){return tvConnected;} bool pairing(){return open;} int passkey(){return open?123456:-1;}
-bool trusted(){return savedTv;} bool findingTrainers(){return false;} void findTrainers(){}
+bool trusted(){return savedTv;} bool findingTrainers(){return false;} void findTrainers(){if(!tvConnected&&vlink::canSwitch(device,now))++findCalls;}
 bool forgetTvs(){++forgetCalls;savedTv=false;tvConnected=false;open=false;return true;}
 }
 static bool usbConnected=false;
@@ -56,6 +58,7 @@ bool VoltraLink::requestCable(bool open){if(open&&(!canSwitch(device,now)||devic
 bool VoltraLink::requestLoad(uint32_t expectedSession){if(expectedSession!=UINT32_MAX&&expectedSession!=device.session)return false;++loadCalls;return canLoad(device,now);}
 bool VoltraLink::requestUnload(uint32_t expectedSession,UnloadSource){if(expectedSession!=UINT32_MAX&&expectedSession!=device.session)return false;++unloadCalls;return true;}
 bool VoltraLink::requestTwin(bool create,uint32_t,uint32_t,uint32_t){
+ ++twinCalls;if(rejectTwinRequest)return false;
  if(!canChangeTwin(device,now,create))return false;
  device.twinConnection=create?2:0;device.endpoint.status=create?0x12:0;device.twinMs=device.endpointMs=now;
  strcpy(device.endpoint.peer,create?device.trainers[1-device.selected].address:"00:00:00:00:00:00");return true;
@@ -75,7 +78,9 @@ void snapshot(const char* path){
  for(int y=0;y<360;++y)for(int x=0;x<360;++x){uint16_t p=framebuffer[y*360+x];unsigned char rgb[3]={static_cast<unsigned char>((p>>11)*255/31),static_cast<unsigned char>(((p>>5)&63)*255/63),static_cast<unsigned char>((p&31)*255/31)};if((x-180)*(x-180)+(y-180)*(y-180)>180*180)memset(rgb,0,3);fwrite(rgb,1,3,f);}fclose(f);
 }
 int main(){
- lv_init();lv_tick_set_cb(millis);auto* d=lv_display_create(360,360);lv_display_set_color_format(d,LV_COLOR_FORMAT_RGB565);static uint16_t buf[360*30];lv_display_set_buffers(d,buf,nullptr,sizeof(buf),LV_DISPLAY_RENDER_MODE_PARTIAL);
+ lv_init();lv_tick_set_cb(millis);auto* d=lv_display_create(360,360);lv_display_set_color_format(d,LV_COLOR_FORMAT_RGB565);
+ // uint16_t guarantees only 2-byte alignment; LVGL requires 4 even on the host.
+ alignas(LV_DRAW_BUF_ALIGN) static uint16_t buf[360*30];lv_display_set_buffers(d,buf,nullptr,sizeof(buf),LV_DISPLAY_RENDER_MODE_PARTIAL);
  lv_display_set_flush_cb(d,[](lv_display_t* d,const lv_area_t* a,uint8_t* px){++flushCalls;auto* p=reinterpret_cast<uint16_t*>(px);for(int y=a->y1;y<=a->y2;++y)for(int x=a->x1;x<=a->x2;++x)framebuffer[y*360+x]=*p++;lv_display_flush_ready(d);});
  auto* pointer=lv_indev_create();lv_indev_set_type(pointer,LV_INDEV_TYPE_POINTER);
  lv_indev_set_read_cb(pointer,[](lv_indev_t* input,lv_indev_data_t* data){data->point.x=pointerX;data->point.y=pointerY;data->state=touching?LV_INDEV_STATE_PRESSED:LV_INDEV_STATE_RELEASED;ui::filterTouch(input,data);});
@@ -88,6 +93,7 @@ int main(){
  assert(!lv_obj_has_flag(batteryWidget,LV_OBJ_FLAG_CLICKABLE));
  lv_obj_update_layout(batteryWidget);assert(lv_obj_get_width(batteryWidget)==66);
  now+=900;snapshot("build/preview-splash.ppm");now+=1200;snapshot("build/preview-selector.ppm");
+ assert(tvbridge::findCalls==0); // Startup leaves trusted-TV reconnection available.
  auto swipePointer=[&](bool left){
   const int before=unloadCalls;
   pointerX=left?210:150;pointerY=160;touching=true;snapshot("build/swipe-start.ppm");
@@ -441,9 +447,48 @@ int main(){
  lv_obj_send_event(absent,LV_EVENT_CLICKED,nullptr);assert(device.selected==0);
  device.trainers[1].lastSeenMs=now;snapshot("build/preview-trainer-nearby.ppm");assert(!lv_obj_has_state(absent,LV_STATE_DISABLED));
  assert(strcmp(lv_label_get_text(lv_obj_get_child(absent,1)),"Saved · Nearby")==0);
- // A saved but unobserved peer never counts as nearby, including with TV discovery paused.
+ auto* twinAction=lv_obj_get_child(selector,3);auto* connectionNotice=lv_obj_get_child(selector,1);
+ // All supported unloaded modes expose a working action; users need not
+ // discover a separate device-side idle screen before creating or exiting Twin.
+ const int beforeTwinRequests=twinCalls;
+ for(int mode:{1,2,4,7}){
+   device.mode=mode;device.fitnessMode=4;device.loaded=false;device.armed=false;device.trainers[1].lastSeenMs=now;
+   snapshot("build/preview-create-twin-ready.ppm");
+   assert(!lv_obj_has_flag(twinAction,LV_OBJ_FLAG_HIDDEN)&&!lv_obj_has_state(twinAction,LV_STATE_DISABLED));
+   assert(!strcmp(lv_label_get_text(connectionNotice),"Ready to create Twin"));
+   lv_obj_send_event(twinAction,LV_EVENT_CLICKED,nullptr);snapshot("build/preview-twin-created.ppm");
+   assert(device.endpoint.paired());
+   assert(!strcmp(lv_label_get_text(lv_obj_get_child(twinAction,0)),"Exit Twin"));
+   lv_obj_send_event(twinAction,LV_EVENT_CLICKED,nullptr);snapshot("build/preview-twin-exit-unloaded.ppm");
+   assert(!device.endpoint.paired());
+ }
+ assert(twinCalls==beforeTwinRequests+8);
+ // Reopening the selector explicitly scans, even with a remembered TV. A
+ // connected TV or an open pairing window is never interrupted by navigation.
+ const bool priorPairing=tvbridge::open;tvbridge::open=false;tvbridge::savedTv=true;
+ const int beforeFindCalls=tvbridge::findCalls;
+ lv_obj_send_event(lv_obj_get_child(lv_screen_active(),1),LV_EVENT_CLICKED,nullptr);
+ snapshot("build/preview-explicit-trainer-discovery.ppm");assert(tvbridge::findCalls==beforeFindCalls+1);
+ snapshot("build/preview-discovery-window-stable.ppm");assert(tvbridge::findCalls==beforeFindCalls+1);
+ tvbridge::tvConnected=true;lv_obj_send_event(lv_obj_get_child(lv_screen_active(),1),LV_EVENT_CLICKED,nullptr);
+ assert(tvbridge::findCalls==beforeFindCalls+1);
+ tvbridge::tvConnected=false;tvbridge::open=true;lv_obj_send_event(lv_obj_get_child(lv_screen_active(),1),LV_EVENT_CLICKED,nullptr);
+ assert(tvbridge::findCalls==beforeFindCalls+1);tvbridge::open=priorPairing;
+ device.loaded=true;device.fitnessMode=5;snapshot("build/preview-twin-unload-required.ppm");
+ assert(lv_obj_has_state(twinAction,LV_STATE_DISABLED));
+ assert(!strcmp(lv_label_get_text(connectionNotice),"Unload both trainers first"));
+ lv_obj_send_event(twinAction,LV_EVENT_CLICKED,nullptr);assert(twinCalls==beforeTwinRequests+8);
+ device.loaded=false;device.fitnessMode=4;device.mode=1;device.trainers[1].lastSeenMs=now;
+ snapshot("build/preview-twin-retry-ready.ppm");rejectTwinRequest=true;
+ lv_obj_send_event(twinAction,LV_EVENT_CLICKED,nullptr);snapshot("build/preview-twin-request-rejected.ppm");
+ assert(!strcmp(lv_label_get_text(connectionNotice),"Could not start · Try again"));
+ rejectTwinRequest=false;now+=3100;device.trainers[1].lastSeenMs=now;
+ // A saved but unobserved peer is discoverable as an action, without being
+ // misrepresented as nearby or enabling an unverified pairing command.
  device.discoveryPausedForTv=true;device.trainers[1].seen=false;snapshot("build/preview-saved-reconnect.ppm");
- assert(lv_obj_has_flag(lv_obj_get_child(selector,3),LV_OBJ_FLAG_HIDDEN));
+ assert(!lv_obj_has_flag(twinAction,LV_OBJ_FLAG_HIDDEN));
+ assert(lv_obj_has_state(twinAction,LV_STATE_DISABLED));
+ assert(!strcmp(lv_label_get_text(connectionNotice),"Swipe right · Find trainers"));
  assert(strcmp(lv_label_get_text(lv_obj_get_child(absent,1)),"Saved · Reconnect")==0);
  device.discoveryPausedForTv=false;device.trainers[1].seen=true;device.trainers[1].lastSeenMs=now;
  // A third nearby trainer remains discoverable with both saved slots occupied.
@@ -452,7 +497,7 @@ int main(){
  auto* list=lv_obj_get_child(selector,2);auto* newRow=lv_obj_get_child(list,2);
  assert(!lv_obj_has_flag(newRow,LV_OBJ_FLAG_HIDDEN));
  assert(strcmp(lv_label_get_text(lv_obj_get_child(newRow,1)),"New · Nearby")==0);
- assert(lv_obj_has_flag(lv_obj_get_child(selector,3),LV_OBJ_FLAG_HIDDEN)); // three nearby is ambiguous
+ assert(!lv_obj_has_flag(twinAction,LV_OBJ_FLAG_HIDDEN)); // Discovery ambiguity never hides the action.
  lv_obj_scroll_to_y(list,140,LV_ANIM_OFF);snapshot("build/preview-unsaved-nearby.ppm");
  const uint32_t beforeNewSession=device.session;
  lv_obj_send_event(newRow,LV_EVENT_CLICKED,nullptr);snapshot("build/preview-saved-slots-full.ppm");

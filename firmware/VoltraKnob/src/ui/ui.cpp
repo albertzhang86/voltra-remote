@@ -29,6 +29,7 @@ lv_style_t filledTickStyle;
 lv_obj_t *tabs[4],*tabValues[4],*isoLabels[4],*modePanel;
 lv_obj_t *bandDetails,*damperRoman,*switchController,*switchControllerText;
 bool choosingController=false;
+uint32_t twinRequestRejectedUntil=0;
 bool tvPage=false;
 lv_obj_t *tvPanel,*tvStatus,*tvPin,*tvButton,*tvPairButton,*tvButtonText,*tvFindButton,*tvForgetButton,*tvBackButton;
 lv_obj_t *managePanel,*manageRows[2],*manageNames[2],*manageButton;
@@ -85,6 +86,35 @@ void setTextOpacity(lv_obj_t* obj,lv_opa_t opacity,lv_style_selector_t part){if(
 void setBgOpacity(lv_obj_t* obj,lv_opa_t opacity,lv_style_selector_t part){if(lv_obj_get_style_bg_opa(obj,part)!=opacity){lv_obj_set_style_bg_opa(obj,opacity,part);}}
 void setHidden(lv_obj_t* obj,bool hidden){if(hidden!=lv_obj_has_flag(obj,LV_OBJ_FLAG_HIDDEN)){if(hidden)lv_obj_add_flag(obj,LV_OBJ_FLAG_HIDDEN);else lv_obj_remove_flag(obj,LV_OBJ_FLAG_HIDDEN);}}
 bool pending(){for(const auto& e:isoEdits)if(e.pending)return true;if(bandEdit.pending||damperEdit.pending)return true;for(auto& e:edits)if(e.pending)return true;return false;}
+bool showTwinAction(const vlink::DeviceState& s,uint32_t now){
+ if(s.endpoint.paired()||s.twinPending)return true;
+ if(s.selected<0||s.selected>=2||!s.trainers[s.selected].address[0])return false;
+ // Keep the action discoverable when TV radio use pauses advertisements.
+ // Remembering a peer does not enable pairing: canChangeTwin still verifies it.
+ if(s.trainers[1-s.selected].address[0])return true;
+ for(const auto& trainer:s.nearby)
+   if(vlink::nearbyAdvertisement(trainer,now)&&strcasecmp(trainer.address,s.trainers[s.selected].address))return true;
+ return false;
+}
+const char* twinNotice(const vlink::DeviceState& s,uint32_t now,bool visible){
+ if(!strcmp(s.message,"Saved slots full: Manage devices"))return "Saved slots full · Manage devices";
+ if(s.twinPending)return s.message;
+ if(twinRequestRejectedUntil&&static_cast<int32_t>(twinRequestRejectedUntil-now)>0)return "Could not start · Try again";
+ if(s.twinCompleted&&!s.twinSucceeded)return s.message;
+ if(!visible)return s.discoveryPausedForTv?"Swipe right · Find trainers":"Nearby trainers";
+ if(!vlink::fresh(s,now))return "Connect a trainer first";
+ if(s.loaded||s.armed||!voltra::fitnessModeUnloaded(s.fitnessMode))return "Unload both trainers first";
+ if(s.cableActive)return "Close cable setup first";
+ if(pending()||loadSentMs||s.parameterSelectionPending||
+    (s.controlBusyUntil&&static_cast<int32_t>(s.controlBusyUntil-now)>0))return "Waiting for current change...";
+ if(!vlink::endpointFresh(s,now))return "Reading trainer status...";
+ if(s.selected<0||s.selected>=2||strcasecmp(s.trainers[s.selected].address,s.endpoint.local))return "Verifying trainer identity...";
+ if(s.mode!=0&&!mappedMode(s.mode))return "Exit current activity first";
+ if(s.twinCompleted&&s.twinSucceeded&&s.mode==0)return s.message;
+ if(!s.endpoint.paired()&&!vlink::nearbyTwinPeer(s,now))
+   return s.discoveryPausedForTv?"Swipe right · Find trainers":"Find a second trainer to pair";
+ return s.endpoint.paired()?"Twin connected":"Ready to create Twin";
+}
 lv_obj_t* label(lv_obj_t* parent,const char* text,int x,int y,const lv_font_t* font,uint32_t ink=theme::Text){
  auto* l=lv_label_create(parent);setText(l,text);setFont(l,font,0);setTextColor(l,color(ink),0);lv_obj_align(l,LV_ALIGN_TOP_MID,x,y);return l;
 }
@@ -144,7 +174,13 @@ void choose(lv_event_t* event){
  const bool selected=slot>=0?vlink::voltraLink.selectTrainer(slot):vlink::voltraLink.selectNearbyTrainer(choiceAddresses[row]);
  if(selected){choosingController=false;choosing=false;lv_obj_add_flag(selector,LV_OBJ_FLAG_HIDDEN);for(auto& e:edits)e.reset();bandEdit.reset();damperEdit.reset();resetIso();loadGesture=false;loadSentMs=0;}
 }
-void openSelector(lv_event_t*){choosing=true;toolsPage=false;setHidden(connectionTools,true);loadGesture=false;lv_obj_remove_flag(selector,LV_OBJ_FLAG_HIDDEN);}
+void openSelector(lv_event_t*){
+ choosing=true;toolsPage=false;setHidden(connectionTools,true);loadGesture=false;lv_obj_remove_flag(selector,LV_OBJ_FLAG_HIDDEN);
+ // Explicit trainer selection opens a bounded discovery window. Trusted-TV
+ // advertising otherwise pauses scanning even when no TV is connected.
+ // Do not do this at startup or on every render: trusted TVs must reconnect.
+ if(!tvbridge::connected()&&!tvbridge::pairing())tvbridge::findTrainers();
+}
 void changePage(lv_event_t* e){
  if(vlink::voltraLink.state().mode==7){if(!pending())isoPage=static_cast<int>(reinterpret_cast<intptr_t>(lv_event_get_user_data(e)));loadGesture=false;return;}
  page=static_cast<int>(reinterpret_cast<intptr_t>(lv_event_get_user_data(e)));loadGesture=false;
@@ -339,7 +375,8 @@ void begin(){
  lv_obj_add_flag(modePanel,LV_OBJ_FLAG_HIDDEN);
  selector=lv_obj_create(screen);lv_obj_set_size(selector,360,360);lv_obj_center(selector);setBgColor(selector,color(theme::Background),0);lv_obj_set_style_border_width(selector,0,0);lv_obj_set_style_pad_all(selector,0,0);lv_obj_remove_flag(selector,LV_OBJ_FLAG_SCROLLABLE);
  label(selector,"SELECT TRAINER",0,44,&font_inter_20);
- selectorNotice=label(selector,"One Voltra at a time",0,74,&font_inter_14,theme::Muted);
+ selectorNotice=label(selector,"Nearby trainers",0,74,&font_inter_14,theme::Muted);
+ lv_obj_set_width(selectorNotice,284);lv_obj_set_style_text_align(selectorNotice,LV_TEXT_ALIGN_CENTER,0);lv_label_set_long_mode(selectorNotice,LV_LABEL_LONG_SCROLL_CIRCULAR);
  trainerList=lv_obj_create(selector);lv_obj_set_size(trainerList,272,148);lv_obj_align(trainerList,LV_ALIGN_TOP_MID,0,98);
  lv_obj_set_style_bg_opa(trainerList,LV_OPA_TRANSP,0);lv_obj_set_style_border_width(trainerList,0,0);lv_obj_set_style_pad_all(trainerList,0,0);
  lv_obj_set_scroll_dir(trainerList,LV_DIR_VER);lv_obj_set_scrollbar_mode(trainerList,LV_SCROLLBAR_MODE_AUTO);
@@ -350,8 +387,15 @@ void begin(){
    choiceDetails[i]=label(choices[i],"",0,0,&font_inter_14,theme::Muted);lv_obj_align(choiceDetails[i],LV_ALIGN_CENTER,0,12);
    lv_obj_add_event_cb(choices[i],choose,LV_EVENT_ALL,reinterpret_cast<void*>(static_cast<intptr_t>(i)));
  }
- switchController=button(selector,224,48,0,250,theme::SurfaceLow);switchControllerText=label(switchController,"Create Twin",0,0,&font_inter_16);lv_obj_center(switchControllerText);lv_obj_add_flag(switchController,LV_OBJ_FLAG_HIDDEN);
- lv_obj_add_event_cb(switchController,[](lv_event_t*){const auto s=vlink::voltraLink.state();if(!pending()&&!loadSentMs)vlink::voltraLink.requestTwin(!s.endpoint.paired());},LV_EVENT_CLICKED,nullptr);
+ switchController=button(selector,224,48,0,250,theme::Surface);
+ setTextColor(switchController,color(theme::Text),0);setTextColor(switchController,color(theme::Muted),LV_STATE_DISABLED);
+ setBgColor(switchController,color(theme::SurfaceLow),LV_STATE_DISABLED);lv_obj_set_style_color_filter_opa(switchController,LV_OPA_TRANSP,LV_STATE_DISABLED);
+ switchControllerText=label(switchController,"Create Twin",0,0,&font_inter_16);lv_obj_remove_local_style_prop(switchControllerText,LV_STYLE_TEXT_COLOR,0);lv_obj_center(switchControllerText);lv_obj_add_flag(switchController,LV_OBJ_FLAG_HIDDEN);
+ lv_obj_add_event_cb(switchController,[](lv_event_t*){
+   const auto s=vlink::voltraLink.state();const uint32_t now=millis();
+   if(!pending()&&!loadSentMs&&vlink::canChangeTwin(s,now,!s.endpoint.paired()))
+     twinRequestRejectedUntil=vlink::voltraLink.requestTwin(!s.endpoint.paired())?0:now+3000;
+ },LV_EVENT_CLICKED,nullptr);
  selectorCue=label(selector,"Swipe right for connections",0,310,&font_inter_12,theme::Muted);
  connectionTools=lv_obj_create(selector);lv_obj_set_size(connectionTools,360,360);lv_obj_center(connectionTools);
  setBgColor(connectionTools,color(theme::Background),0);lv_obj_set_style_border_width(connectionTools,0,0);lv_obj_set_style_pad_all(connectionTools,0,0);lv_obj_remove_flag(connectionTools,LV_OBJ_FLAG_SCROLLABLE);setHidden(connectionTools,true);
@@ -509,7 +553,7 @@ void loop(){
    return;
  }
  const uint32_t now=millis();const auto s=vlink::voltraLink.state();
- if(s.session!=session){choosingController=false;initialModeHandled=false;closeModes();session=s.session;dialPulseMs=0;choosingCable=false;cableRequested=false;lv_obj_add_flag(cablePanel,LV_OBJ_FLAG_HIDDEN);for(auto& e:edits)e.reset();bandEdit.reset();damperEdit.reset();resetIso();loadGesture=false;loadSentMs=0;}
+ if(s.session!=session){choosingController=false;twinRequestRejectedUntil=0;initialModeHandled=false;closeModes();session=s.session;dialPulseMs=0;choosingCable=false;cableRequested=false;lv_obj_add_flag(cablePanel,LV_OBJ_FLAG_HIDDEN);for(auto& e:edits)e.reset();bandEdit.reset();damperEdit.reset();resetIso();loadGesture=false;loadSentMs=0;}
  const bool live=vlink::fresh(s,now);
  if(bandSessionMode!=s.mode){bandSessionMode=s.mode;bandEdit.reset();damperEdit.reset();resetIso();}
  if(live&&s.mode==2&&s.modeValueMs[0]&&now-s.modeValueMs[0]<8000)bandEdit.observe(s.modeValues[0]);
@@ -606,13 +650,12 @@ void loop(){
 
  if(s.selected>=0){const auto& selected=s.trainers[s.selected];snprintf(text,sizeof(text),"%s",selected.name[0]?selected.name:selected.address+9);setText(trainerLabel,text);}else setText(trainerLabel,"Choose Voltra  v");
  if(!vlink::twinActive(s,now))choosingController=false;
- const bool showTwinAction=s.endpoint.paired()||s.twinPending||vlink::nearbyTwinPeer(s,now);
- setHidden(switchController,!showTwinAction);setText(switchControllerText,s.twinPending?"Updating...":s.endpoint.paired()?"Exit Twin":"Create Twin");
- lv_obj_set_height(trainerList,showTwinAction?144:200);
+ const bool twinActionVisible=showTwinAction(s,now);
+ setHidden(switchController,!twinActionVisible);setText(switchControllerText,s.twinPending?"Updating...":s.endpoint.paired()?"Exit Twin":"Create Twin");
+ lv_obj_set_height(trainerList,twinActionVisible?144:200);
  if(tvCanEdit())lv_obj_remove_state(tvButton,LV_STATE_DISABLED);else lv_obj_add_state(tvButton,LV_STATE_DISABLED);
  if(vlink::canChangeTwin(s,now,!s.endpoint.paired())&&!pending()&&!loadSentMs)lv_obj_remove_state(switchController,LV_STATE_DISABLED);else lv_obj_add_state(switchController,LV_STATE_DISABLED);
- const bool fullMessage=!strcmp(s.message,"Saved slots full: Manage devices");
- setText(selectorNotice,fullMessage?"Saved slots full · Manage devices":s.twinPending?s.message:s.twinCompleted&&!s.twinSucceeded?s.message:showTwinAction&&s.mode!=0?"Finish training to change Twin":s.discoveryPausedForTv?"Discovery paused for TV":"Nearby trainers");
+ setText(selectorNotice,twinNotice(s,now,twinActionVisible));
  int row=0;
  auto renderTrainer=[&](const vlink::Trainer& trainer,int slot){
    const bool saved=slot>=0,paired=saved&&pairedChoice(s,slot,now);

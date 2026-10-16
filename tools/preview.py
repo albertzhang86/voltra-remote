@@ -17,5 +17,6 @@ for font in (root/'firmware/VoltraKnob/src/ui').glob('*.c'):
  subprocess.run(['clang','-O1',*includes,'-c',str(font),'-o',str(obj)],check=True)
  objs.append(str(obj))
 subprocess.run(['clang++','-std=c++17','-O1',*includes,'-I'+str(root/'test/host'),'-I'+str(root/'firmware/VoltraKnob/src'),str(root/'test/host/ui_preview.cpp'),str(root/'firmware/VoltraKnob/src/ui/ui.cpp'),*objs,'-o',str(root/'build/ui-preview')],check=True)
-subprocess.run([str(root/'build/ui-preview')],cwd=root,check=True)
+# LVGL's embedded assertion handler halts forever; bound native preview failures.
+subprocess.run([str(root/'build/ui-preview')],cwd=root,check=True,timeout=60)
 print('Rendered actual firmware screens in build/preview-*.ppm')

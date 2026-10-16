@@ -1,7 +1,9 @@
 #include "minitest.h"
 #include "protocol/twin_protocol.h"
 #include "link/voltra_link.h"
+#include "link/twin_transaction.h"
 #include <cstring>
+#include <initializer_list>
 int main(){
  using namespace voltra;
  uint8_t query[13];auto frame=endpointFrame(query);CHECK(validFrame(frame.data,frame.len));CHECK_EQ(query[10],0xa7);
@@ -34,7 +36,11 @@ int main(){
  s.nearby[1]=s.trainers[1];strcpy(s.nearby[1].address,"02:00:00:00:00:03");CHECK(!vlink::canChangeTwin(s,200,true));
  s.nearby[0]={};s.nearby[1]={};
 
- s.mode=1;CHECK(!vlink::canChangeTwin(s,200,true));s.mode=0;s.fitnessMode=5;CHECK(!vlink::canChangeTwin(s,200,true));s.fitnessMode=4;
+ for(int mode:{0,1,2,4,7}){s.mode=mode;CHECK(vlink::canChangeTwin(s,200,true));}
+ s.mode=3;CHECK(!vlink::canChangeTwin(s,200,true));s.mode=0;
+ s.loaded=true;CHECK(!vlink::canChangeTwin(s,200,true));s.loaded=false;
+ s.armed=true;CHECK(!vlink::canChangeTwin(s,200,true));s.armed=false;
+ s.fitnessMode=5;CHECK(!vlink::canChangeTwin(s,200,true));s.fitnessMode=4;
  s.twinPending=true;CHECK(!vlink::canChangeTwin(s,200,true));s.twinPending=false;
  CHECK(!vlink::canChangeTwin(s,4000,true));s.endpoint.status=0x12;strcpy(s.endpoint.peer,s.trainers[1].address);
  CHECK(vlink::canChangeTwin(s,200,false));CHECK(!vlink::canChangeTwin(s,200,true));
@@ -57,5 +63,49 @@ int main(){
  s.link=vlink::LinkState::Connecting;CHECK(!vlink::canChangeTwin(s,20200,true));
  s.link=vlink::LinkState::Ready;s.fitnessMode=5;CHECK(!vlink::canChangeTwin(s,20200,true));
  s.discoveryPausedForTv=false;CHECK(!vlink::trainerAvailable(s,1,20200));
+
+ // Connecting the second GATT client stops its advertisements. Fresh, verified
+ // GATT state is sufficient for the transaction, even after discovery expires.
+ vlink::TwinParticipant controller,peer;
+ controller.endpoint.valid=true;controller.endpoint.status=0;
+ strcpy(controller.endpoint.local,"02:00:00:00:00:01");strcpy(controller.endpoint.peer,"00:00:00:00:00:00");
+ controller.endpointAt=controller.statusAt=21000;controller.fitness=4;
+ peer=controller;strcpy(peer.endpoint.local,"02:00:00:00:00:02");
+ const char* controllerAddress="02:00:00:00:00:01";
+ const char* peerAddress="02:00:00:00:00:02";
+ for(int mode:{0,1,2,4,7}){
+   controller.mode=peer.mode=mode;
+   CHECK(vlink::twinParticipantIndependent(controller,controllerAddress,21200));
+   CHECK(vlink::twinParticipantIndependent(peer,peerAddress,21200));
+   CHECK(vlink::twinParticipantIdle(peer,peerAddress,21200)==(mode==0));
+ }
+ peer.mode=0;
+ for(int fitness:{1,2,3,5,6,21,-1}){
+   peer.fitness=fitness;CHECK(!vlink::twinParticipantIndependent(peer,peerAddress,21200));
+ }
+ peer.fitness=4;
+ CHECK(!vlink::twinParticipantIndependent(peer,controllerAddress,21200));
+ CHECK(!vlink::twinParticipantIndependent(peer,peerAddress,25000));
+ peer.statusAt=0;CHECK(!vlink::twinParticipantIndependent(peer,peerAddress,21200));peer.statusAt=21000;
+ peer.endpoint.status=0x11;CHECK(!vlink::twinParticipantIndependent(peer,peerAddress,21200));peer.endpoint.status=0;
+ peer.mode=6;CHECK(!vlink::twinParticipantIndependent(peer,peerAddress,21200));peer.mode=0;
+ CHECK(vlink::twinParticipantIdle(peer,peerAddress,21200));
+
+ // A request acknowledgment alone cannot prove native pairing. Require the
+ // controller's new, fresh endpoint report identifying the requested peer.
+ controller.mode=0;controller.endpoint.status=0x12;
+ strcpy(controller.endpoint.peer,peerAddress);controller.endpointAt=21200;
+ CHECK(vlink::twinCreateConfirmed(true,controller,controllerAddress,peerAddress,21000,21300));
+ CHECK(!vlink::twinCreateConfirmed(false,controller,controllerAddress,peerAddress,21000,21300));
+ CHECK(!vlink::twinCreateConfirmed(true,controller,controllerAddress,peerAddress,21200,21300));
+ CHECK(!vlink::twinCreateConfirmed(true,controller,controllerAddress,"02:00:00:00:00:03",21000,21300));
+ CHECK(!vlink::twinCreateConfirmed(true,controller,peerAddress,peerAddress,21000,21300));
+ CHECK(!vlink::twinCreateConfirmed(true,controller,controllerAddress,peerAddress,21000,25000));
+ CHECK(!vlink::twinExitConfirmed(true,controller,controllerAddress,21000,21300));
+ controller.endpoint.status=0;strcpy(controller.endpoint.peer,"00:00:00:00:00:00");
+ CHECK(vlink::twinExitConfirmed(true,controller,controllerAddress,21000,21300));
+ CHECK(!vlink::twinExitConfirmed(false,controller,controllerAddress,21000,21300));
+ CHECK(!vlink::twinExitConfirmed(true,controller,controllerAddress,21200,21300));
+ CHECK(!vlink::twinCreateConfirmed(true,controller,controllerAddress,peerAddress,21000,21300));
  std::printf("%d checks, %d failures\n",g_checks,g_failures);return g_failures?1:0;
 }
