@@ -64,6 +64,70 @@ int main(){
  s.link=vlink::LinkState::Ready;s.fitnessMode=5;CHECK(!vlink::canChangeTwin(s,20200,true));
  s.discoveryPausedForTv=false;CHECK(!vlink::trainerAvailable(s,1,20200));
 
+ // A trusted exact-peer TV handoff can perform the read-only peer handshake
+ // while advertisements are paused. It never relaxes standalone discovery.
+ s.link=vlink::LinkState::Ready;s.statusMs=s.endpointMs=20100;s.mode=1;s.fitnessMode=4;
+ s.discoveryPausedForTv=true;s.trainers[1]={};s.nearby[0]={};
+ vlink::TvTwinOffer offer;offer.epoch=7;offer.session=s.session;offer.deadline=21500;offer.ready=true;
+ strcpy(offer.peer,"02:00:00:00:00:02");
+ CHECK(!vlink::canChangeTwin(s,20200,true));
+ CHECK(vlink::canHandoffTwin(s,offer,7,offer.peer,20200));
+ // With A+B saved, a TV-owned C cannot silently replace B after pairing.
+ // Exercise both controller slots, a free slot, and case-insensitive peer reuse.
+ for(int controllerSlot:{0,1}){
+   auto saved=s;auto slotOffer=offer;saved.selected=controllerSlot;
+   saved.trainers[0]={};saved.trainers[1]={};
+   strcpy(saved.trainers[controllerSlot].address,s.endpoint.local);
+   strcpy(slotOffer.peer,"02:00:00:00:AB:CD");
+   auto& peerSlot=saved.trainers[1-controllerSlot];
+   CHECK(vlink::canHandoffTwin(saved,slotOffer,7,slotOffer.peer,20200));
+   strcpy(peerSlot.address,"02:00:00:00:00:03");
+   CHECK(!vlink::canHandoffTwin(saved,slotOffer,7,slotOffer.peer,20200));
+   strcpy(saved.nearby[0].address,slotOffer.peer);saved.nearby[0].seen=true;saved.nearby[0].lastSeenMs=20200;
+   CHECK(!vlink::canHandoffTwin(saved,slotOffer,7,slotOffer.peer,20200));
+   strcpy(peerSlot.address,"02:00:00:00:ab:cd");
+   CHECK(vlink::canHandoffTwin(saved,slotOffer,7,slotOffer.peer,20200));
+ }
+ CHECK(!vlink::canHandoffTwin(s,offer,8,offer.peer,20200));
+ CHECK(!vlink::canHandoffTwin(s,offer,7,"02:00:00:00:00:03",20200));
+ CHECK(!vlink::canHandoffTwin(s,offer,7,offer.peer,21500));
+ offer.ready=false;CHECK(!vlink::canHandoffTwin(s,offer,7,offer.peer,20200));offer.ready=true;
+ ++offer.session;CHECK(!vlink::canHandoffTwin(s,offer,7,offer.peer,20200));--offer.session;
+ s.loaded=true;CHECK(!vlink::canHandoffTwin(s,offer,7,offer.peer,20200));s.loaded=false;
+ s.armed=true;CHECK(!vlink::canHandoffTwin(s,offer,7,offer.peer,20200));s.armed=false;
+ s.twinPending=true;CHECK(!vlink::canHandoffTwin(s,offer,7,offer.peer,20200));s.twinPending=false;
+ s.parameterSelectionPending=true;CHECK(!vlink::canHandoffTwin(s,offer,7,offer.peer,20200));s.parameterSelectionPending=false;
+ s.cableActive=true;CHECK(!vlink::canHandoffTwin(s,offer,7,offer.peer,20200));s.cableActive=false;
+ s.controlBusyUntil=21000;CHECK(!vlink::canHandoffTwin(s,offer,7,offer.peer,20200));s.controlBusyUntil=0;
+ s.endpointMs=1;CHECK(!vlink::canHandoffTwin(s,offer,7,offer.peer,20200));s.endpointMs=20100;
+ s.fitnessMode=5;CHECK(!vlink::canHandoffTwin(s,offer,7,offer.peer,20200));s.fitnessMode=4;
+ // The short offer TTL only admits the request. A three-second auth wait or
+ // delayed TV notification must not invalidate the accepted 40-second operation.
+ // Revocation, identity/session changes and the original operation deadline do.
+ offer.revision=3;
+ const uint32_t acceptedRevision=offer.revision,transactionDeadline=60200;
+ const char* offeredPeer="02:00:00:00:00:02";
+ auto accepted=[&](uint32_t now){
+   return vlink::tvTwinTransactionAuthorized(offer,acceptedRevision,7,s.session,offeredPeer,transactionDeadline,now);
+ };
+ CHECK(accepted(20200));CHECK(accepted(25000));
+ CHECK(!vlink::canHandoffTwin(s,offer,7,offeredPeer,25000)); // An expired offer cannot start another transaction.
+ CHECK(accepted(transactionDeadline-1));CHECK(!accepted(transactionDeadline));
+ offer.deadline=70000;CHECK(!accepted(transactionDeadline)); // A refresh cannot extend the accepted operation.
+ CHECK(!vlink::tvTwinTransactionAuthorized(offer,0,7,s.session,offeredPeer,transactionDeadline,25000));
+ CHECK(!vlink::tvTwinTransactionAuthorized(offer,acceptedRevision,0,s.session,offeredPeer,transactionDeadline,25000));
+ CHECK(!vlink::tvTwinTransactionAuthorized(offer,acceptedRevision,8,s.session,offeredPeer,transactionDeadline,25000));
+ ++offer.session;CHECK(!accepted(25000));--offer.session;
+ offer.ready=false;CHECK(!accepted(25000));offer.ready=true;
+ strcpy(offer.peer,"02:00:00:00:00:03");CHECK(!accepted(25000));strcpy(offer.peer,offeredPeer);
+ ++offer.revision;CHECK(!accepted(25000)); // Revoking and re-offering the same peer cannot revive the old request.
+ offer.revision=acceptedRevision;
+ const uint32_t wrapStarted=UINT32_MAX-1000,wrapDeadline=wrapStarted+40000;
+ offer.deadline=wrapStarted+500;
+ CHECK(!vlink::tvTwinAuthorization(offer,7,s.session,offeredPeer,wrapStarted+3000));
+ CHECK(vlink::tvTwinTransactionAuthorized(offer,acceptedRevision,7,s.session,offeredPeer,wrapDeadline,wrapStarted+3000));
+ CHECK(!vlink::tvTwinTransactionAuthorized(offer,acceptedRevision,7,s.session,offeredPeer,wrapDeadline,wrapDeadline));
+ strcpy(offer.peer,s.trainers[0].address);CHECK(!vlink::canHandoffTwin(s,offer,7,offer.peer,20200));
  // Connecting the second GATT client stops its advertisements. Fresh, verified
  // GATT state is sufficient for the transaction, even after discovery expires.
  vlink::TwinParticipant controller,peer;
@@ -102,7 +166,28 @@ int main(){
  CHECK(!vlink::twinCreateConfirmed(true,controller,peerAddress,peerAddress,21000,21300));
  CHECK(!vlink::twinCreateConfirmed(true,controller,controllerAddress,peerAddress,21000,25000));
  CHECK(!vlink::twinExitConfirmed(true,controller,controllerAddress,21000,21300));
+ // Mode restoration waits for readbacks received after temporary peer teardown.
+ // Its cached paired endpoint or prior idle status cannot authorize the write.
+ const uint32_t teardownAt=21250;
+ controller.endpointAt=controller.statusAt=21200;
+ CHECK(!vlink::twinModeRestoreReady(controller,controllerAddress,peerAddress,true,teardownAt,21400));
+ controller.endpointAt=21300;
+ CHECK(!vlink::twinModeRestoreReady(controller,controllerAddress,peerAddress,true,teardownAt,21400));
+ controller.statusAt=21300;
+ CHECK(vlink::twinModeRestoreReady(controller,controllerAddress,peerAddress,true,teardownAt,21400));
+ CHECK(!vlink::twinModeRestoreReady(controller,controllerAddress,peerAddress,false,teardownAt,21400));
+ CHECK(!vlink::twinModeRestoreReady(controller,controllerAddress,"02:00:00:00:00:03",true,teardownAt,21400));
+ CHECK(!vlink::twinModeRestoreReady(controller,peerAddress,peerAddress,true,teardownAt,21400));
+ CHECK(!vlink::twinModeRestoreReady(controller,controllerAddress,peerAddress,true,teardownAt,25000));
+ controller.fitness=5;CHECK(!vlink::twinModeRestoreReady(controller,controllerAddress,peerAddress,true,teardownAt,21400));controller.fitness=4;
+ controller.mode=2;CHECK(!vlink::twinModeRestoreReady(controller,controllerAddress,peerAddress,true,teardownAt,21400));controller.mode=0;
  controller.endpoint.status=0;strcpy(controller.endpoint.peer,"00:00:00:00:00:00");
+ CHECK(vlink::twinModeRestoreReady(controller,controllerAddress,peerAddress,false,teardownAt,21400));
+ CHECK(!vlink::twinModeRestoreReady(controller,controllerAddress,peerAddress,true,teardownAt,21400));
+ controller.endpointAt=controller.statusAt=50;
+ CHECK(vlink::twinModeRestoreReady(controller,controllerAddress,peerAddress,false,UINT32_MAX-100,100));
+ CHECK(!vlink::twinModeRestoreReady(controller,controllerAddress,peerAddress,false,50,100));
+ controller.endpointAt=21200;controller.statusAt=21000;
  CHECK(vlink::twinExitConfirmed(true,controller,controllerAddress,21000,21300));
  CHECK(!vlink::twinExitConfirmed(false,controller,controllerAddress,21000,21300));
  CHECK(!vlink::twinExitConfirmed(true,controller,controllerAddress,21200,21300));

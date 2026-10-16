@@ -8,6 +8,7 @@
 #include "link/voltra_link.h"
 #include "ui/ui.h"
 #include "ui/theme.h"
+#include "tv/tv_bridge.h"
 static uint32_t now=100;
 uint32_t millis(){return now;}
 static vlink::DeviceState device;
@@ -24,6 +25,20 @@ static int rotation=0,settingCalls=0,bandCalls=0,bandRequested=-1,damperCalls=0,
 namespace tvbridge {
 bool open=false,savedTv=false,tvConnected=false;
 int forgetCalls=0,findCalls=0;
+MixedTwinOffer mixedOffer;
+uint32_t mixedOfferDeadline=0,mixedOfferSession=0;
+int mixedRequests=0;
+MixedTwinOffer mixedTwinOffer(){
+ if(!savedTv||!tvConnected||mixedOfferSession!=device.session){
+   mixedOffer={};mixedOfferDeadline=0;mixedOfferSession=0;
+ }
+ auto offer=mixedOffer;
+ if((mixedOfferDeadline&&static_cast<int32_t>(now-mixedOfferDeadline)>=0)||
+    !vlink::twinSetupReady(device,now)||!device.endpoint.independent())offer.available=false;
+ return offer;
+}
+bool canRequestMixedTwin(){const auto offer=mixedTwinOffer();return offer.available&&!offer.pending&&vlink::twinSetupReady(device,now)&&device.endpoint.independent()&&ui::tvCanEdit();}
+bool requestMixedTwin(){if(!canRequestMixedTwin())return false;++mixedRequests;mixedOffer.pending=true;strcpy(mixedOffer.message,"Waiting for TV...");return true;}
 void openPairing(){open=true;} void disconnect(){open=false;}
 bool connected(){return tvConnected;} bool pairing(){return open;} int passkey(){return open?123456:-1;}
 bool trusted(){return savedTv;} bool findingTrainers(){return false;} void findTrainers(){if(!tvConnected&&vlink::canSwitch(device,now))++findCalls;}
@@ -57,7 +72,7 @@ bool VoltraLink::requestIsokinetic(int index,int value){if(!canEditIsokinetic(de
 bool VoltraLink::requestCable(bool open){if(open&&(!canSwitch(device,now)||device.loaded||device.armed||device.mode<=0))return false;device.cableActive=open;return true;}
 bool VoltraLink::requestLoad(uint32_t expectedSession){if(expectedSession!=UINT32_MAX&&expectedSession!=device.session)return false;++loadCalls;return canLoad(device,now);}
 bool VoltraLink::requestUnload(uint32_t expectedSession,UnloadSource){if(expectedSession!=UINT32_MAX&&expectedSession!=device.session)return false;++unloadCalls;return true;}
-bool VoltraLink::requestTwin(bool create,uint32_t,uint32_t,uint32_t){
+bool VoltraLink::requestTwin(bool create,uint32_t,uint32_t,uint32_t,const char*,bool){
  ++twinCalls;if(rejectTwinRequest)return false;
  if(!canChangeTwin(device,now,create))return false;
  device.twinConnection=create?2:0;device.endpoint.status=create?0x12:0;device.twinMs=device.endpointMs=now;
@@ -241,6 +256,11 @@ int main(){
  lv_obj_send_event(band,LV_EVENT_CLICKED,nullptr);assert(device.mode==2);
  assert(lv_obj_has_flag(modePanel,LV_OBJ_FLAG_HIDDEN));
  swipePointer(true);snapshot("build/preview-mode-menu.ppm");
+ assert(ui::tvCanEdit()); // Browsing is not an in-flight local setting write.
+ device.mode=4;device.modeValues[5]=4;device.modeValueMs[5]=now;
+ snapshot("build/preview-mode-menu-remote-change.ppm");
+ assert(lv_obj_has_flag(modePanel,LV_OBJ_FLAG_HIDDEN));
+ device.mode=2;snapshot("build/preview-mode-menu-restored.ppm");swipePointer(true);
  const int settingsBefore=settingCalls;rotation=1;snapshot("build/preview-mode-dial.ppm");
  assert(settingCalls==settingsBefore);assert(device.mode==2); // Browse, don't send weights or modes.
  lv_obj_send_event(lv_obj_get_child(modePanel,4),LV_EVENT_CLICKED,nullptr);assert(device.mode==4);
@@ -332,6 +352,11 @@ int main(){
  snapshot("build/preview-connecting-unknown.ppm");assert(lv_obj_has_flag(modePanel,LV_OBJ_FLAG_HIDDEN));
  device.link=vlink::LinkState::Ready;device.mode=0;device.fitnessMode=0;
  snapshot("build/preview-initial-idle-modes.ppm");assert(!lv_obj_has_flag(modePanel,LV_OBJ_FLAG_HIDDEN));
+ assert(ui::tvCanEdit());
+ device.mode=2;device.fitnessMode=4;snapshot("build/preview-idle-remote-mode.ppm");
+ assert(lv_obj_has_flag(modePanel,LV_OBJ_FLAG_HIDDEN));
+ device.mode=0;device.fitnessMode=0;snapshot("build/preview-idle-after-remote-mode.ppm");
+ assert(!lv_obj_has_flag(modePanel,LV_OBJ_FLAG_HIDDEN)&&ui::tvCanEdit());
  auto* center=lv_obj_get_child(modePanel,4);auto* name=lv_obj_get_child(center,0);
  assert(strcmp(lv_label_get_text(name),"Weight\nTraining")==0);
  rotation=1;snapshot("build/preview-mode-name-band.ppm");assert(strcmp(lv_label_get_text(name),"Resistance\nBand")==0);
@@ -490,6 +515,107 @@ int main(){
  assert(lv_obj_has_state(twinAction,LV_STATE_DISABLED));
  assert(!strcmp(lv_label_get_text(connectionNotice),"Swipe right · Find trainers"));
  assert(strcmp(lv_label_get_text(lv_obj_get_child(absent,1)),"Saved · Reconnect")==0);
+ // A fresh trusted-TV offer exposes its connected peer without a BLE advertisement.
+ // Create requests a TV handoff; it must never call the local native pairing path.
+ const bool previousTvConnected=tvbridge::tvConnected,previousSavedTv=tvbridge::savedTv;
+ tvbridge::tvConnected=true;tvbridge::savedTv=true;
+ tvbridge::mixedOffer.owned=true;tvbridge::mixedOffer.available=true;
+ tvbridge::mixedOfferDeadline=now+5000;tvbridge::mixedOfferSession=device.session;
+ strcpy(tvbridge::mixedOffer.peerAddress,device.trainers[1].address);
+ strcpy(tvbridge::mixedOffer.peerName,"TV-connected VOLTRA");
+ snapshot("build/preview-twin-tv-peer.ppm");
+ assert(!lv_obj_has_flag(twinAction,LV_OBJ_FLAG_HIDDEN)&&!lv_obj_has_state(twinAction,LV_STATE_DISABLED));
+ assert(!vlink::canChangeTwin(device,now,true));
+ assert(!strcmp(lv_label_get_text(lv_obj_get_child(absent,1)),"Connected to TV"));
+ assert(lv_obj_has_state(absent,LV_STATE_DISABLED));
+ const int localTwinBefore=twinCalls,mixedBefore=tvbridge::mixedRequests;
+ lv_obj_send_event(absent,LV_EVENT_CLICKED,nullptr);assert(device.selected==0);
+ // Readiness expires, ownership does not. A saved TV peer must not become a
+ // selectable reconnect row just because the next readiness packet is delayed.
+ now+=6000;snapshot("build/preview-twin-tv-saved-stale.ppm");
+ assert(!lv_obj_has_flag(twinAction,LV_OBJ_FLAG_HIDDEN)&&lv_obj_has_state(twinAction,LV_STATE_DISABLED));
+ assert(!lv_obj_has_flag(absent,LV_OBJ_FLAG_HIDDEN)&&lv_obj_has_state(absent,LV_STATE_DISABLED));
+ assert(!strcmp(lv_label_get_text(lv_obj_get_child(absent,1)),"Connected to TV"));
+ assert(!strcmp(lv_label_get_text(connectionNotice),"Waiting for TV readiness..."));
+ lv_obj_send_event(absent,LV_EVENT_CLICKED,nullptr);lv_obj_send_event(twinAction,LV_EVENT_CLICKED,nullptr);
+ assert(device.selected==0&&tvbridge::mixedRequests==mixedBefore&&twinCalls==localTwinBefore);
+ // A refreshed offer restores only the action; the protected row stays put.
+ now+=3100;tvbridge::mixedOfferDeadline=now+5000;
+ snapshot("build/preview-twin-tv-refreshed.ppm");
+ assert(!lv_obj_has_state(twinAction,LV_STATE_DISABLED)&&lv_obj_has_state(absent,LV_STATE_DISABLED));
+ device.loaded=true;device.fitnessMode=5;
+ snapshot("build/preview-twin-tv-owned-loaded.ppm");
+ assert(lv_obj_has_state(twinAction,LV_STATE_DISABLED)&&lv_obj_has_state(absent,LV_STATE_DISABLED));
+ assert(!strcmp(lv_label_get_text(lv_obj_get_child(absent,1)),"Connected to TV"));
+ assert(!strcmp(lv_label_get_text(connectionNotice),"Unload both trainers first"));
+ device.loaded=false;device.fitnessMode=4;tvbridge::mixedOffer.available=false;
+ snapshot("build/preview-twin-tv-owned-not-ready.ppm");
+ assert(vlink::canSwitch(device,now)); // Only the TV peer is busy, so local switching would otherwise be permitted.
+ lv_obj_send_event(absent,LV_EVENT_CLICKED,nullptr);lv_obj_send_event(twinAction,LV_EVENT_CLICKED,nullptr);
+ assert(device.selected==0&&tvbridge::mixedRequests==mixedBefore&&twinCalls==localTwinBefore);
+ assert(lv_obj_has_state(twinAction,LV_STATE_DISABLED)&&lv_obj_has_state(absent,LV_STATE_DISABLED));
+ now+=3100;tvbridge::mixedOffer.available=true;tvbridge::mixedOfferDeadline=now+5000;
+ snapshot("build/preview-twin-tv-ready-again.ppm");
+ lv_obj_send_event(twinAction,LV_EVENT_CLICKED,nullptr);snapshot("build/preview-twin-tv-pending.ppm");
+ assert(tvbridge::mixedRequests==mixedBefore+1&&twinCalls==localTwinBefore&&!device.endpoint.paired());
+ assert(lv_obj_has_state(twinAction,LV_STATE_DISABLED));
+ assert(!strcmp(lv_label_get_text(lv_obj_get_child(twinAction,0)),"Updating..."));
+ assert(!strcmp(lv_label_get_text(connectionNotice),"Waiting for TV..."));
+ // Releasing the TV's GATT ownership does not expose a local-connect action
+ // while the handoff is pending, even after its initial offer has expired.
+ tvbridge::mixedOffer.owned=false;tvbridge::mixedOffer.available=false;now+=6000;
+ snapshot("build/preview-twin-tv-released-pending.ppm");
+ assert(lv_obj_has_state(absent,LV_STATE_DISABLED)&&lv_obj_has_state(twinAction,LV_STATE_DISABLED));
+ assert(!strcmp(lv_label_get_text(lv_obj_get_child(absent,1)),"Joining Twin..."));
+ lv_obj_send_event(absent,LV_EVENT_CLICKED,nullptr);lv_obj_send_event(twinAction,LV_EVENT_CLICKED,nullptr);
+ assert(device.selected==0&&tvbridge::mixedRequests==mixedBefore+1&&twinCalls==localTwinBefore);
+ tvbridge::mixedOffer.owned=true;tvbridge::mixedOffer.pending=false;
+ strcpy(tvbridge::mixedOffer.message,"TV could not release trainer");
+ snapshot("build/preview-twin-tv-failed.ppm");
+ assert(!strcmp(lv_label_get_text(connectionNotice),"TV could not release trainer"));
+ // TV-owned peers can be displayed without taking a saved slot or duplicating advertisements.
+ const auto tvPeerSaved=device.trainers[1];device.trainers[1]={};
+ tvbridge::mixedOffer.available=true;tvbridge::mixedOffer.message[0]=0;
+ tvbridge::mixedOfferDeadline=now+5000;
+ device.nearby[0]=tvPeerSaved;device.nearby[0].seen=true;device.nearby[0].lastSeenMs=now;
+ snapshot("build/preview-twin-tv-unsaved-peer.ppm");
+ assert(!strcmp(lv_label_get_text(lv_obj_get_child(absent,0)),"TV-connected VOLTRA"));
+ assert(!strcmp(lv_label_get_text(lv_obj_get_child(absent,1)),"Connected to TV"));
+ assert(lv_obj_has_flag(lv_obj_get_child(lv_obj_get_child(selector,2),2),LV_OBJ_FLAG_HIDDEN));
+ // Expiry between the last render and the tap cannot fall through to local pairing.
+ now+=6000;device.statusMs=device.endpointMs=now;
+ device.nearby[0].lastSeenMs=now;
+ assert(vlink::canChangeTwin(device,now,true));
+ lv_obj_send_event(twinAction,LV_EVENT_CLICKED,nullptr);
+ assert(tvbridge::mixedRequests==mixedBefore+1&&twinCalls==localTwinBefore);
+ now+=3100;device.nearby[0].lastSeenMs=now;snapshot("build/preview-twin-tv-offer-expired.ppm");
+ assert(!lv_obj_has_flag(twinAction,LV_OBJ_FLAG_HIDDEN)&&lv_obj_has_state(twinAction,LV_STATE_DISABLED));
+ assert(!lv_obj_has_flag(absent,LV_OBJ_FLAG_HIDDEN)&&lv_obj_has_state(absent,LV_STATE_DISABLED));
+ assert(!strcmp(lv_label_get_text(connectionNotice),"Waiting for TV readiness..."));
+ lv_obj_send_event(absent,LV_EVENT_CLICKED,nullptr);lv_obj_send_event(twinAction,LV_EVENT_CLICKED,nullptr);
+ assert(device.selected==0&&tvbridge::mixedRequests==mixedBefore+1&&twinCalls==localTwinBefore);
+ // Explicit ownership release allows the independently discovered peer to be
+ // selected normally. The old TV offer must not keep that row locked forever.
+ tvbridge::mixedOffer={};tvbridge::mixedOfferDeadline=0;
+ snapshot("build/preview-twin-tv-owner-released.ppm");
+ assert(!lv_obj_has_state(absent,LV_STATE_DISABLED));
+ assert(!strcmp(lv_label_get_text(lv_obj_get_child(absent,1)),"New · Nearby"));
+ lv_obj_send_event(absent,LV_EVENT_CLICKED,nullptr);assert(device.selected==1);
+ device.selected=0;device.trainers[1]={};device.nearby[0]={};
+ lv_obj_send_event(lv_obj_get_child(lv_screen_active(),1),LV_EVENT_CLICKED,nullptr);
+ tvbridge::mixedOffer.owned=true;tvbridge::mixedOffer.available=true;tvbridge::mixedOfferSession=device.session;
+ tvbridge::mixedOfferDeadline=now+5000;
+ strcpy(tvbridge::mixedOffer.peerAddress,tvPeerSaved.address);strcpy(tvbridge::mixedOffer.peerName,"TV-connected VOLTRA");
+ snapshot("build/preview-twin-tv-session-owned.ppm");assert(!lv_obj_has_flag(absent,LV_OBJ_FLAG_HIDDEN));
+ // Loss of the authenticated TV session revokes the old ownership record;
+ // reconnecting cannot resurrect it without a new offer.
+ tvbridge::tvConnected=false;snapshot("build/preview-twin-tv-session-lost.ppm");
+ assert(lv_obj_has_flag(absent,LV_OBJ_FLAG_HIDDEN)&&!tvbridge::mixedOffer.owned);
+ tvbridge::tvConnected=true;snapshot("build/preview-twin-tv-new-session.ppm");
+ assert(lv_obj_has_flag(absent,LV_OBJ_FLAG_HIDDEN));
+ tvbridge::mixedOffer={};tvbridge::mixedOfferDeadline=0;tvbridge::mixedOfferSession=0;
+ tvbridge::tvConnected=previousTvConnected;tvbridge::savedTv=previousSavedTv;
+ device.trainers[1]=tvPeerSaved;now+=3100;
  device.discoveryPausedForTv=false;device.trainers[1].seen=true;device.trainers[1].lastSeenMs=now;
  // A third nearby trainer remains discoverable with both saved slots occupied.
  auto& discovered=device.nearby[0];strcpy(discovered.address,"10:20:30:aa:bb:03");strcpy(discovered.name,"VOLTRA - New");discovered.seen=true;discovered.lastSeenMs=now;

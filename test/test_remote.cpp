@@ -193,6 +193,73 @@ int main(){
   moving.link=vlink::LinkState::Ready;vlink::clearWeightTelemetry(moving);
   CHECK_EQ(moving.motionMs,0u);CHECK_EQ(moving.cableLengthMm,-1);
   CHECK_EQ(vlink::movingWeightReading(moving,1003).tenthsLb,-1);
+  // Twin force must contain both synchronized channels. A local stream and
+  // delayed independent packet cannot overwrite or be doubled into pair force.
+  {
+  vlink::DeviceState pair=moving;endpoint(pair,1000,true);
+  pair.loaded=true;pair.fitnessMode=5;pair.mode=1;
+  voltra::Event twin;twin.type=voltra::EventType::Telemetry;twin.twinTelemetry=true;
+  twin.hasTwinPairMotion=true;twin.activeWeightTenths=40;twin.peerForceTenths=60;
+  twin.cableVelocityMmPerSecond=100;twin.peerCableVelocityMmPerSecond=0;
+  for(int mode:{1,2,4,7}){
+    pair.mode=mode;vlink::updateWeightTelemetry(pair,twin,1000);
+    CHECK_EQ(vlink::movingWeightReading(pair,1001).tenthsLb,100);
+  }
+  CHECK_EQ(vlink::movingWeightReading(pair,1500).tenthsLb,-1);
+  twin.cableVelocityMmPerSecond=0;twin.peerCableVelocityMmPerSecond=-100;
+  vlink::updateWeightTelemetry(pair,twin,1000);CHECK_EQ(vlink::movingWeightReading(pair,1001).tenthsLb,100);
+  twin.peerCableVelocityMmPerSecond=0;vlink::updateWeightTelemetry(pair,twin,1000);
+  CHECK_EQ(vlink::movingWeightReading(pair,1001).tenthsLb,-1);
+  twin.peerCableVelocityMmPerSecond=-100;twin.peerForceTenths=-1;
+  vlink::updateWeightTelemetry(pair,twin,1000);CHECK_EQ(pair.pairMotionMs,0u);
+  twin.peerForceTenths=10001;vlink::updateWeightTelemetry(pair,twin,1000);CHECK_EQ(pair.pairMotionMs,0u);
+  twin.peerForceTenths=60;vlink::updateWeightTelemetry(pair,twin,1000);
+  vlink::updateWeightTelemetry(pair,motion,1001);CHECK_EQ(pair.pairMotionMs,1000u);
+  twin.hasTwinPairMotion=false;vlink::updateWeightTelemetry(pair,twin,1001);CHECK_EQ(pair.pairMotionMs,1000u);
+  pair.loaded=false;pair.fitnessMode=4;CHECK_EQ(vlink::movingWeightReading(pair,1001).tenthsLb,-1);
+  pair.loaded=true;pair.fitnessMode=5;pair.twinPending=true;CHECK_EQ(vlink::movingWeightReading(pair,1001).tenthsLb,-1);
+  pair.twinPending=false;pair.endpointMs=0;CHECK_EQ(vlink::movingWeightReading(pair,1001).tenthsLb,-1);
+  endpoint(pair,1000,true);twin.repCount=7;vlink::updateRepetitionTelemetry(pair,twin,1001);
+  CHECK_EQ(vlink::repetitionReading(pair,1002),7);
+  motion.repCount=99;vlink::updateRepetitionTelemetry(pair,motion,1002);CHECK_EQ(pair.reps,7);
+  twin.repCount=0;vlink::updateRepetitionTelemetry(pair,twin,1002);CHECK_EQ(pair.reps,0);
+  pair.twinPending=true;CHECK_EQ(vlink::repetitionReading(pair,1002),-1);pair.twinPending=false;
+  pair.endpointMs=0;CHECK_EQ(vlink::repetitionReading(pair,1002),-1);endpoint(pair,1000);
+  vlink::clearWeightTelemetry(pair);vlink::updateWeightTelemetry(pair,twin,1003);CHECK_EQ(pair.motionMs,0u);CHECK_EQ(pair.pairMotionMs,0u);
+  twin.repCount=20;vlink::updateRepetitionTelemetry(pair,twin,1003);CHECK_EQ(pair.reps,0);
+  vlink::updateRepetitionTelemetry(pair,motion,1003);CHECK_EQ(pair.reps,99);
+  }
+
+  // Replay real Twin B4 data through the display gate. Resting preload stays
+  // hidden; unequal moving forces are summed once, never target or local * 2.
+  {
+    auto packet=[](const char* hex){
+      uint8_t bytes[40]{};const size_t size=std::strlen(hex)/2;
+      for(size_t i=0;i<size;++i){unsigned value;std::sscanf(hex+2*i,"%2x",&value);bytes[i]=value;}
+      return voltra::decode(bytes,size);
+    };
+    auto rest=packet("551b047510aa1e9e1000b40600020000003c00080002000000456f");
+    auto returning=packet("551b047510aaa6b11000b46700640091fe67006b00630085fe657c");
+    auto counted=packet("551f044e10aa0ea91200b43d00f20085fe030001003c003f00ed0032fe55c3");
+    vlink::DeviceState pair;pair.link=vlink::LinkState::Ready;pair.statusMs=1000;
+    pair.mode=1;pair.fitnessMode=5;pair.loaded=true;endpoint(pair,1000,true);
+    vlink::updateWeightTelemetry(pair,rest,1000);
+    CHECK_EQ(pair.pairForceTenths,14);CHECK_EQ(vlink::movingWeightReading(pair,1001).tenthsLb,-1);
+    vlink::updateWeightTelemetry(pair,returning,1010);
+    CHECK_EQ(vlink::movingWeightReading(pair,1011).tenthsLb,210);
+    CHECK_EQ(vlink::movingWeightReading(pair,1510).tenthsLb,-1);
+    vlink::updateWeightTelemetry(pair,counted,1520);vlink::updateRepetitionTelemetry(pair,counted,1520);
+    CHECK_EQ(vlink::movingWeightReading(pair,1521).tenthsLb,124);CHECK_EQ(vlink::repetitionReading(pair,1521),1);
+    vlink::updateWeightTelemetry(pair,rest,1530);CHECK_EQ(vlink::movingWeightReading(pair,1531).tenthsLb,-1);
+    // Sentinel/invalid force clears the pair, even if its other cable is moving.
+    returning.peerForceTenths=0xffff;vlink::updateWeightTelemetry(pair,returning,1540);
+    CHECK_EQ(pair.pairMotionMs,0u);CHECK_EQ(vlink::movingWeightReading(pair,1541).tenthsLb,-1);
+    returning.peerForceTenths=107;returning.activeWeightTenths=0xffff;
+    vlink::updateWeightTelemetry(pair,returning,1550);CHECK_EQ(pair.pairMotionMs,0u);
+    endpoint(pair,1560);vlink::clearWeightTelemetry(pair);
+    vlink::updateWeightTelemetry(pair,counted,1561);CHECK_EQ(pair.motionMs,0u);
+  }
+
   // Discovery is separate from both saved slots, deduplicated, and bounded.
   vlink::DeviceState discovered;strcpy(discovered.trainers[0].address,"saved-left");strcpy(discovered.trainers[1].address,"saved-right");
   CHECK_EQ(vlink::nearbySlot(discovered,"new-trainer",1000),0);

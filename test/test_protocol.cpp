@@ -292,4 +292,62 @@ static void testDecode() {
   CHECK(decode(nullptr, 0).type == EventType::Unknown);
 }
 
-MINITEST_MAIN({ testFrames(); testDecode(); })
+// Synthetic layout regressions against the verified Cortex decoder contract.
+// These are not physical Twin telemetry captures; device validation is separate.
+static void testTwinRuntime(){
+ uint8_t b[160];
+ for(bool lengthByte:{false,true})for(int bodySize:{64,66}){
+   const int start=lengthByte?13:12;
+   const size_t n=synth(b,start+bodySize+2,"550004",{{8,0x20},{10,0xaa},{11,0x81}});
+   if(lengthByte)b[12]=bodySize;
+   auto put=[&](int off,int value){b[start+off]=value&255;b[start+off+1]=(value>>8)&255;};
+   b[start]=1;put(1,3);put(3,7);put(9,40);put(11,300);put(13,-200);
+   b[start+43]=3;put(44,60);put(46,500);put(48,250);
+   auto e=decode(b,n);CHECK(e.type==EventType::Telemetry);CHECK(e.twinTelemetry);CHECK(e.hasTwinPairMotion);
+   CHECK_EQ(e.repCount,7);CHECK_EQ(e.setCounter,3);CHECK_EQ(e.activeWeightTenths,40);CHECK_EQ(e.peerForceTenths,60);
+   CHECK_EQ(e.cableVelocityMmPerSecond,-200);CHECK_EQ(e.peerCableVelocityMmPerSecond,250);
+   CHECK(!e.hasTargetForceReport); // Do not mislabel local target as pair total.
+   b[11]=0xa1;e=decode(b,n);CHECK(!e.hasTwinPairMotion);CHECK_EQ(e.repCount,-1);
+ }
+ for(int length:{29,31,41,43,52,54,63,65,67}){
+   const size_t n=synth(b,15+length,"550004",{{8,0x20},{10,0xaa},{11,0x81},{12,length}});
+   CHECK(!decode(b,n).hasTwinPairMotion);
+ }
+ const size_t n=synth(b,31,"550004",{{8,0x12},{10,0xb4},{11,40},{17,3},{19,7}});
+ auto e=decode(b,n);CHECK(e.twinTelemetry);CHECK_EQ(e.repCount,7);CHECK_EQ(e.setCounter,3);
+ CHECK(e.hasTwinPairMotion);CHECK_EQ(e.activeWeightTenths,40);CHECK_EQ(e.peerForceTenths,0);
+ b[19]=0;b[20]=0;e=decode(b,n);CHECK_EQ(e.repCount,0);
+ b[9]=1;e=decode(b,n);CHECK_EQ(e.repCount,-1);b[9]=0;
+ for(int source:{0x10,0x11,0x13}){b[8]=source;CHECK_EQ(decode(b,n).repCount,-1);}
+ b[8]=0x12;CHECK_EQ(decode(b,n-1).repCount,-1);
+}
+
+// Actual Twin samples captured during five reps: a stationary cable, return
+// motion, a range update, and a completed-count update. No device IDs are stored.
+static void testCapturedTwinRuntime(){
+ struct Fixture{const char* hex;int force,peer,velocity,peerVelocity,sets,reps;};
+ for(const auto& fixture:{
+   Fixture{"551b047510aa1e9e1000b40600020000003c00080002000000456f",6,8,0,0,-1,-1},
+   Fixture{"551b047510aaa6b11000b46700640091fe67006b00630085fe657c",103,107,-367,-379,-1,-1},
+   Fixture{"551f044e10aa72a91100b44200bd0064fe00000e013c003f00c200f7fec097",66,63,-412,-265,-1,-1},
+   Fixture{"551f044e10aa0ea91200b43d00f20085fe030001003c003f00ed0032fe55c3",61,63,-379,-462,3,1}}){
+   uint8_t bytes[40]{};const size_t size=std::strlen(fixture.hex)/2;
+   for(size_t i=0;i<size;++i){unsigned value;std::sscanf(fixture.hex+2*i,"%2x",&value);bytes[i]=value;}
+   CHECK(validFrame(bytes,size));const auto e=decode(bytes,size);
+   CHECK(e.twinTelemetry);CHECK(e.hasTwinPairMotion);CHECK(e.hasMotionTelemetry);
+   CHECK_EQ(e.activeWeightTenths,fixture.force);CHECK_EQ(e.peerForceTenths,fixture.peer);
+   CHECK_EQ(e.cableVelocityMmPerSecond,fixture.velocity);CHECK_EQ(e.peerCableVelocityMmPerSecond,fixture.peerVelocity);
+   CHECK_EQ(e.setCounter,fixture.sets);CHECK_EQ(e.repCount,fixture.reps);
+   CHECK(!e.hasTargetForceReport);CHECK_EQ(e.targetForceTenths,-1);
+   for(size_t length=13;length<size;++length)CHECK(!decode(bytes,length).hasTwinPairMotion);
+   CHECK(!decode(bytes,size+1).hasTwinPairMotion);CHECK(!decode(bytes,size+2).hasTwinPairMotion);
+   // A missing target cannot erase the two actual measurements.
+   const size_t target=bytes[8]==0x10?17:21;bytes[target]=bytes[target+1]=0xff;
+   CHECK_EQ(decode(bytes,size).peerForceTenths,fixture.peer);
+   CHECK_EQ(decode(bytes,size).activeWeightTenths,fixture.force);
+   bytes[9]=1;CHECK(!decode(bytes,size).hasTwinPairMotion);bytes[9]=0;
+   bytes[2]=8;CHECK(!decode(bytes,size).hasTwinPairMotion);
+ }
+}
+
+MINITEST_MAIN({ testFrames(); testDecode(); testTwinRuntime(); testCapturedTwinRuntime(); })

@@ -28,6 +28,19 @@ int main(){
     state.cableVelocityMmPerSecond=100;
     state.armed=true;CHECK(!remote::trainingReadout(state,1100,true,false).liveWeight);state.armed=false;
   }
+  state.endpoint.status=0x12;std::strcpy(state.endpoint.peer,"02:00:00:00:00:02");
+  state.pairForceTenths=100;state.pairMotionMs=1000;state.pairMoving=true;
+  state.loaded=true;state.fitnessMode=5;
+  for(int mode:{1,2,4,7}){
+    state.mode=mode;const auto reading=remote::trainingReadout(state,1100,true,false);
+    CHECK(reading.liveWeight);CHECK_EQ(reading.forceTenthsLb,100);
+    CHECK(!remote::trainingReadout(state,1500,true,false).liveWeight);
+    CHECK(!remote::trainingReadout(state,1100,false,false).liveWeight);
+    CHECK(!remote::trainingReadout(state,1100,true,true).liveWeight);
+  }
+  state.loaded=false;state.fitnessMode=4;
+  CHECK(remote::trainingReadout(state,1100,true,false).unloaded);
+  CHECK(!remote::trainingReadout(state,1100,true,false).liveWeight);
   state.mode=1;state.loaded=false;state.fitnessMode=999;
   CHECK(!remote::trainingReadout(state,1100,true,false).unloaded);
   state.fitnessMode=4;state.statusMs=0;

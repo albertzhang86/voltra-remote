@@ -139,11 +139,14 @@ changes; the existing knob command gates and trainer confirmation remain authori
 Local draft edits block TV changes. The bridge cannot load/unload, select a trainer,
 or start training. Bridge v2 supports Create/Exit Twin with verified roles and both
 batteries; its pair/exit request requires unloaded trainers and confirms idle before
-changing topology. Twin live force/reps are withheld
-until validated from hardware, rather than doubling a single cable reading.
+changing topology. Classified native Twin runtime counts and complete local/peer
+force samples now reach the TV as logical pair telemetry. Unsupported packet
+families remain unavailable; a single cable reading is never doubled. Native Twin
+Weight Training live force and reps passed physical knob/TV verification on
+October 16; other modes and trainer firmware versions still need acceptance.
 Expired commands or commands for an old trainer/TV connection are rejected.
 The primary number shows the configured setting at rest, including loaded without
-cable movement. Fresh independent B4 force replaces it during loaded movement;
+cable movement. Fresh B4 force replaces it during loaded movement;
 stopping or losing fresh motion returns to the setting. Explicitly unloaded state
 dims the configured number and adds a dot in all four modes. Damper uses Factor
 at rest; Isokinetic uses speed in m/s. Editing and modifier pages keep their own
@@ -156,7 +159,29 @@ B4 fields are force at payload +0 (u16, tenths lb), cable length at +2 (u16, mm)
 and velocity at +4 (i16, mm/s), as decoded by Cortex. Residual cable tension or
 absolute cable extension alone never proves movement. Session/load/mode/topology
 changes and legacy force-only packets clear motion evidence. Native Twin motion
-is not inferred from one trainer.
+is not inferred from one trainer. The October 16 five-rep hardware capture
+established the paired B4 layouts sent by these trainers: source 0x10 has a
+6-byte local force/length/velocity block, while sources 0x11/0x12 have a 10-byte
+local block with four additional bytes for range endpoints (0x11) or set/rep
+counts (0x12). Each is followed by a 2-byte target and the peer's 6-byte
+force/length/velocity block. Only these exact 14/18-byte payloads are accepted.
+Both measured forces are summed once, excluding the target; at least one cable
+must be moving, with the same 500 ms freshness limit. Stationary preload stays
+hidden. Complete recognized AA81 pair samples are also supported.
+
+Source 0x12 reports the controller's runtime rep count directly, without a
+pull-index offset; source 0x11 never updates reps. The captured counts advanced
+1–5 alongside matching controller/peer per-rep reports, and the TV showed five
+reps. After installation, a second five-rep test verified changing live weight on
+both the knob and TV. Captured channels of 7.5 + 8.5 lb reached the TV as 16.0 lb,
+and 9.6 + 8.3 lb reached it as 17.9 lb. Stationary preload cleared the live-force
+readout; unloading restored the dimmed configured 5 kg while retaining five reps.
+The user confirmed both displays worked. Ordinary paired endpoint refreshes
+preserve readings, while
+mode/topology changes clear them. Common fields and AA81 were cross-checked
+against the locally installed Cortex decoder; no Cortex implementation or binary
+is redistributed. Bounded `[twin-rx]` and `[twin-weight]` USB diagnostics support
+the remaining hardware qualification.
 
 Separately, independent target resistance uses the trainer's reported target while
 loaded, and zero only when fresh fitness state 4 explicitly reports unloaded.
@@ -181,8 +206,8 @@ payload word is force in tenths of a pound; the optional trailing word is target
 force. Real 21/25-byte capture fixtures verify this distinction (1.0–1.2 lb cable
 tension versus 6 lb target). An absent target or its `0xffff` sentinel clears the
 target cache. Matching target resistance to the trainer's dynamic on-screen value
-still requires physical validation. Native Twin variants and
-unidentified `0xaa94` batches are not interpreted. The existing telemetry rate was
+still requires physical validation. Native Twin variants use the separate pair
+path described above; unidentified `0xaa94` batches are not interpreted. The existing telemetry rate was
 already 10 Hz, so this change does not alter the rate or training settings. Bounded USB diagnostics enqueue
 one raw notification per family and print from the worker without blocking BLE.
 Bridge v2 also reports the knob's display unit in optional flags. Weight Training
@@ -246,6 +271,29 @@ The prebuilt ZIP contains a Python installer, firmware with SHA-256 checks, sour
 Release r17 enables local voice control: say “Load weight” to request loading, or “Release” / “Release weight” to request unloading. No wake phrase or touch is required. Load requires the selected trainer’s control page, fresh ready/unloaded state, confirmed settings and no pending edit/action. Release uses the priority unload path and remains available during a pending load or stale status. Commands are tied to the current connection session; duplicate Load cannot toggle into Unload. Voice control runs without bottom-screen labels; the trainer’s reported state drives the normal loaded/unloaded display. Recognition can miss or falsely detect speech; keep the physical unloading control available. The speech model and pronunciation settings are unchanged from the accepted recognition test.
 
 Microphone audio normally stays on-device without recording. Running `tools/capture_voice.py --port PORT --output build/voice-diagnostic` arms the explicit eight-second recording tap and disables voice actuation until reboot. Audio is retrieved locally over USB, with no cloud service. Upload using `tools/upload.py` so the speech-model partition is included. See [release notes](RELEASE_NOTES.md), [build instructions](BUILDING.md) and [test coverage](TESTING.md).
+
+### Twin with a TV-connected trainer
+
+When one trainer is connected to the knob and another directly to the TV, the TV
+shares the other trainer's identity and readiness through the authenticated bridge.
+The selector shows that peer as **Connected to TV**. Authorization to start Twin
+expires after two seconds without a refresh. Once accepted, the handshake has a
+fixed 40-second limit and still cancels on explicit revocation, changed trainer
+identity/session, or TV disconnect. The known TV-owned peer remains protected
+from local connection until the TV releases it or the trusted session ends.
+
+Create Twin on either device uses the same handoff: the TV releases its trainer,
+the knob finds that exact peer, and the existing knob trainer becomes controller.
+The button sends a session-bound request to the TV; the offer alone never starts
+pairing. Repeated notifications cannot repeat the pairing command. Exit restores
+the former peer's direct TV connection when the TV still owns the handoff context.
+Standalone knob pairing keeps its existing nearby-device flow.
+
+Protocol, host UI and simulated handoff tests pass. The October 16 physical
+TV-button mixed Create/Exit cycle passed with the knob trainer as controller,
+Weight Training restored after both transitions, and both trainers unloaded.
+The user also confirmed knob-button Create/Exit Twin on October 16. Other training
+modes and automatic exercise transitions still require physical acceptance.
 
 ### Knob battery indicator
 

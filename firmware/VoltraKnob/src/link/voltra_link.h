@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <cstring>
 #include "../protocol/mode_parameters.h"
 #include "../protocol/twin_protocol.h"
 namespace vlink {
@@ -41,6 +42,9 @@ struct DeviceState {
   uint32_t forceMs=0,repMs=0;
   int cableLengthMm=-1,cableVelocityMmPerSecond=0;
   uint32_t motionMs=0;
+  int pairForceTenths=-1;
+  uint32_t pairMotionMs=0;
+  bool pairMoving=false;
   int targetForceTenths=-1;
   uint32_t targetForceMs=0;
   int runtimeWeightLbs=-1;
@@ -75,8 +79,13 @@ inline ActiveWeightReading activeWeightReading(const DeviceState& s,uint32_t now
 // cable can retain tension, so neither force > 0 nor an extended cable proves
 // movement. 10 mm/s rejects near-zero speed jitter; freshness is bounded to 0.5 s.
 inline ActiveWeightReading movingWeightReading(const DeviceState& s,uint32_t now){
- if(!fresh(s,now)||!endpointFresh(s,now)||s.twinPending||!s.endpoint.independent()||!voltra::supportedMode(s.mode))return {};
+ if(!fresh(s,now)||!endpointFresh(s,now)||s.twinPending||!voltra::supportedMode(s.mode))return {};
  if(!s.loaded||s.armed||!voltra::fitnessModeLoaded(s.fitnessMode))return {};
+ if(s.endpoint.paired()){
+   if(!s.pairMotionMs||now-s.pairMotionMs>=500||!s.pairMoving||s.pairForceTenths<0)return {};
+   return {s.pairForceTenths,ActiveWeightSource::CableForce};
+ }
+ if(!s.endpoint.independent())return {};
  if(!s.motionMs||s.motionMs!=s.forceMs||now-s.motionMs>=500)return {};
  if(s.cableVelocityMmPerSecond>-10&&s.cableVelocityMmPerSecond<10)return {};
  if(s.activeWeightTenths<0||s.activeWeightTenths>10000)return {};
@@ -85,11 +94,25 @@ inline ActiveWeightReading movingWeightReading(const DeviceState& s,uint32_t now
 inline void clearWeightTelemetry(DeviceState& s){
  s.activeWeightTenths=-1;s.forceMs=0;
  s.cableLengthMm=-1;s.cableVelocityMmPerSecond=0;s.motionMs=0;
+ s.pairForceTenths=-1;s.pairMotionMs=0;s.pairMoving=false;
  s.targetForceTenths=-1;s.targetForceMs=0;
  s.runtimeWeightLbs=-1;s.runtimeWeightMs=0;
 }
 inline void updateWeightTelemetry(DeviceState& s,const voltra::Event& e,uint32_t now){
- if(s.endpoint.paired())return;
+ if(s.twinPending)return;
+ if(s.endpoint.paired()){
+   if(e.twinTelemetry&&e.hasTwinPairMotion){
+     const bool valid=e.activeWeightTenths>=0&&e.peerForceTenths>=0&&
+       e.activeWeightTenths<=10000&&e.peerForceTenths<=10000&&
+       e.activeWeightTenths+e.peerForceTenths<=10000;
+     s.pairForceTenths=valid?e.activeWeightTenths+e.peerForceTenths:-1;
+     s.pairMotionMs=valid?now:0;
+     s.pairMoving=valid&&(e.cableVelocityMmPerSecond<=-10||e.cableVelocityMmPerSecond>=10||
+       e.peerCableVelocityMmPerSecond<=-10||e.peerCableVelocityMmPerSecond>=10);
+   }
+   return;
+ }
+ if(e.twinTelemetry)return;
  if(e.type==voltra::EventType::Telemetry){
    const bool valid=e.activeWeightTenths>=0&&e.activeWeightTenths<=10000;
    s.activeWeightTenths=valid?e.activeWeightTenths:-1;s.forceMs=valid?now:0;
@@ -106,6 +129,16 @@ inline void updateWeightTelemetry(DeviceState& s,const voltra::Event& e,uint32_t
    const bool valid=e.runtimeWeightLbs>=0&&e.runtimeWeightLbs<=1000;
    s.runtimeWeightLbs=valid?e.runtimeWeightLbs:-1;s.runtimeWeightMs=valid?now:0;
  }
+}
+inline void updateRepetitionTelemetry(DeviceState& s,const voltra::Event& e,uint32_t now){
+ if(e.repCount<0||e.repCount>=65535||s.twinPending||!fresh(s,now)||!endpointFresh(s,now))return;
+ if(s.endpoint.paired()!=e.twinTelemetry)return;
+ if(!s.endpoint.paired()&&!s.endpoint.independent())return;
+ s.reps=e.repCount;s.repMs=now;
+}
+inline int repetitionReading(const DeviceState& s,uint32_t now){
+ if(!fresh(s,now)||!endpointFresh(s,now)||s.twinPending||!s.repMs)return -1;
+ return s.endpoint.paired()||s.endpoint.independent()?s.reps:-1;
 }
 inline bool twinActive(const DeviceState& s,uint32_t now){return fresh(s,now)&&endpointFresh(s,now)&&s.endpoint.paired();}
 inline bool twinControlReady(const DeviceState& s,uint32_t now){return !s.twinPending&&endpointFresh(s,now);}
@@ -213,6 +246,37 @@ inline bool canChangeTwin(const DeviceState& s,uint32_t now,bool create){
  if(!create)return s.endpoint.paired();
  return s.endpoint.independent()&&nearbyTwinPeer(s,now);
 }
+// Trusted TV ownership and expiring readiness are separate. Saved identities
+// remain protected while the TV is busy; only a fresh exact-peer authorization
+// can bypass advertisement discovery for a read-only native Twin handshake.
+struct TvTwinOffer {
+ uint32_t epoch=0,session=0,deadline=0,revision=0;
+ bool ready=false;
+ char peer[18]{};
+};
+inline bool tvTwinOfferMatches(const TvTwinOffer& offer,uint32_t epoch,uint32_t session,const char* peer){
+ return epoch&&offer.epoch==epoch&&offer.session==session&&offer.ready&&offer.peer[0]&&peer&&peer[0]&&
+   !strcasecmp(offer.peer,peer);
+}
+inline bool tvTwinAuthorization(const TvTwinOffer& offer,uint32_t epoch,uint32_t session,const char* peer,uint32_t now){
+ return tvTwinOfferMatches(offer,epoch,session,peer)&&static_cast<int32_t>(offer.deadline-now)>0;
+}
+// A fresh offer admits one bounded transaction. Delayed heartbeat delivery must
+// not cancel its read-only handshake; explicit revocation/identity changes still
+// invalidate the accepted revision, and a refresh never extends this deadline.
+inline bool tvTwinTransactionAuthorized(const TvTwinOffer& offer,uint32_t revision,uint32_t epoch,uint32_t session,
+                                       const char* peer,uint32_t transactionDeadline,uint32_t now){
+ return revision&&offer.revision==revision&&tvTwinOfferMatches(offer,epoch,session,peer)&&
+   static_cast<int32_t>(transactionDeadline-now)>0;
+}
+inline bool canHandoffTwin(const DeviceState& s,const TvTwinOffer& offer,uint32_t epoch,const char* peer,uint32_t now){
+ if(!twinSetupReady(s,now)||!s.endpoint.independent()||!tvTwinAuthorization(offer,epoch,s.session,peer,now)||
+    !strcasecmp(peer,s.trainers[s.selected].address))return false;
+ // A handoff may fill a free slot or reuse this peer, never replace another
+ // saved trainer. Check before any handshake/topology change is admitted.
+ const auto& savedPeer=s.trainers[1-s.selected];
+ return !savedPeer.address[0]||!strcasecmp(savedPeer.address,peer);
+}
 class VoltraLink {
  public:
   void begin();
@@ -228,7 +292,8 @@ class VoltraLink {
   bool requestSetting(Parameter parameter,int value);
   // TV commands cannot load/unload, select a trainer, or bypass local gates.
   void setTvSession(uint32_t epoch);
-  bool requestTwin(bool create,uint32_t epoch=0,uint32_t session=UINT32_MAX,uint32_t deadline=0);
+  bool requestTwin(bool create,uint32_t epoch=0,uint32_t session=UINT32_MAX,uint32_t deadline=0,const char* expectedPeer=nullptr,bool handoff=false);
+  void updateTvTwinOffer(uint32_t epoch,uint32_t session,uint32_t deadline,const char* peer,bool ready);
   bool requestTvSetting(uint32_t epoch,uint32_t session,uint32_t deadline,bool mode,uint16_t field,int value);
   bool requestBandMaximum(int pounds);
   bool requestDamperLevel(int index);

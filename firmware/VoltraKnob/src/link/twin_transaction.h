@@ -26,6 +26,15 @@ inline bool twinParticipantIndependent(const TwinParticipant& device,const char*
 inline bool twinParticipantIdle(const TwinParticipant& device,const char* address,uint32_t now){
   return twinParticipantUnloaded(device,address,now)&&device.mode==0;
 }
+// After the peer link closes, require new controller readbacks before restoring
+// its previous mode. A paired endpoint captured before teardown is insufficient.
+inline bool twinModeRestoreReady(const TwinParticipant& controller,const char* controllerAddress,
+                                 const char* peerAddress,bool paired,uint32_t after,uint32_t now){
+  if(!twinParticipantIdle(controller,controllerAddress,now)||
+     static_cast<int32_t>(controller.endpointAt-after)<=0||static_cast<int32_t>(controller.statusAt-after)<=0)return false;
+  return paired?controller.endpoint.paired()&&peerAddress&&peerAddress[0]&&
+    !strcasecmp(controller.endpoint.peer,peerAddress):controller.endpoint.independent();
+}
 inline bool twinCreateConfirmed(bool acknowledged,const TwinParticipant& controller,
                                 const char* controllerAddress,const char* peerAddress,
                                 uint32_t previousEndpointAt,uint32_t now){

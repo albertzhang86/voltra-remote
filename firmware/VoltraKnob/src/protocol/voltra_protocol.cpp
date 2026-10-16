@@ -213,10 +213,27 @@ Event decode(const uint8_t* d, size_t n) {
   // Independent terse runtime (cmd 0xb4). Cortex identifies the first u16
   // as forceTenthLbs; the optional last u16 is TARGET force, never live force.
   // Sources 0/1/2 have 6/10/10 payload bytes, optionally followed by that target.
-  // Native Twin sources 0x10..0x12 are a separate, unvalidated contract here.
+  // Captured Twin variants add a target u16 then peer force/length/velocity.
+  // Source 0x12 carries sets/reps like source 1; 0x11 carries ranges like source
+  // 2 (the mapping is crossed, not source & 0x0f). Admit only captured lengths.
   if(n>=13 && d[10]==0xb4){
     const int source=u16le(d,8);
     const size_t payloadSize=n-13;
+    if(d[0]==0x55&&d[2]==0x04&&source>=0x10&&source<=0x12){
+      const size_t localSize=source==0x10?6:10;
+      if(payloadSize!=localSize+8)return e;
+      e.type=EventType::Telemetry;e.twinTelemetry=true;e.hasTwinPairMotion=true;
+      e.activeWeightTenths=u16le(d,11);e.hasMotionTelemetry=true;
+      e.cableLengthMm=u16le(d,13);
+      e.cableVelocityMmPerSecond=static_cast<int16_t>(u16le(d,15));
+      // Both forces belong to this one packet. The target between channels is
+      // not a measurement and must not be added, doubled, or used as fallback.
+      const size_t peerOffset=11+localSize+2;
+      e.peerForceTenths=u16le(d,peerOffset);
+      e.peerCableVelocityMmPerSecond=static_cast<int16_t>(u16le(d,peerOffset+4));
+      if(source==0x12){e.setCounter=u16le(d,17);e.repCount=u16le(d,19);}
+      return e;
+    }
     const size_t baseSize=source==0?6:10;
     if(d[0]==0x55&&d[2]==0x04&&source<=2&&(payloadSize==baseSize||payloadSize==baseSize+2)){
       e.type=EventType::Telemetry;e.activeWeightTenths=u16le(d,11);
@@ -235,6 +252,24 @@ Event decode(const uint8_t* d, size_t n) {
   }
   if (n == 58 && d[0] == 0x55 && d[1] == 0x3a && d[2] == 0x04 && d[3] == 0x70 && vendor(d,n,0x81,0x2b)) {
     e.type = EventType::Telemetry; e.phase = d[13]; e.activeWeightTenths=u16le(d,22); return e;
+  }
+  // Cortex's extended AA81 runtime contract has a 43-byte local block and a
+  // 21-byte peer block (optionally followed by its 2-byte target). Admit only
+  // those complete versions; a short local report cannot imply a peer value.
+  // AA A1 is deliberately not treated as an alias without a verified layout.
+  if(n>=14&&d[0]==0x55&&d[2]==0x04&&d[10]==0xaa&&d[11]==0x81){
+    const uint8_t* runtime=d+12;size_t length=n-14;
+    if(length>0&&runtime[0]==length-1){++runtime;--length;}
+    if(length==64||length==66){
+      e.type=EventType::Telemetry;e.twinTelemetry=true;e.hasTwinPairMotion=true;
+      e.phase=runtime[0];e.setCounter=u16le(runtime,1);e.repCount=u16le(runtime,3);
+      e.activeWeightTenths=u16le(runtime,9);e.hasMotionTelemetry=true;
+      e.cableLengthMm=u16le(runtime,11);
+      e.cableVelocityMmPerSecond=static_cast<int16_t>(u16le(runtime,13));
+      e.peerForceTenths=u16le(runtime,44);
+      e.peerCableVelocityMmPerSecond=static_cast<int16_t>(u16le(runtime,48));
+    }
+    return e;
   }
   if (vendor(d, n, 0x82, 0x3b) && n >= 74) {
     // Captured set 9: pull 0 / return 1, pull 1 / return 2, ... summary 8.

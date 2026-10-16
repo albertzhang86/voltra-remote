@@ -76,6 +76,12 @@ struct Event {
   bool hasMotionTelemetry = false; // Force, cable length and velocity from the same B4 sample.
   int cableLengthMm = -1;
   int cableVelocityMmPerSecond = 0;
+  // Twin runtime reports belong to the confirmed logical controller. A local
+  // force alone is never a pair total; both channels must share one packet.
+  bool twinTelemetry = false;
+  bool hasTwinPairMotion = false;
+  int peerForceTenths = -1;
+  int peerCableVelocityMmPerSecond = 0;
   bool hasTargetForceReport = false; // B4 report, including an absent/invalid target.
   int targetForceTenths = -1; // Device target resistance, independent of measured cable force.
   bool hasRuntimeWeight = false;

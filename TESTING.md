@@ -37,6 +37,12 @@ split at 20-byte boundaries, with synthetic device identities. They also cover
 coalesced packets, CRC/header corruption, bounded noise, connection resets,
 independent controller/peer buffers, partial-frame expiration and timer rollover.
 
+Mixed-handoff tests distinguish the short offer admission deadline from an
+accepted transaction's fixed 40-second deadline. They cover a delayed heartbeat
+during the peer handshake, rejection of a new request using an expired offer,
+explicit revocation, changed peer/TV/trainer session, and uptime wraparound.
+Refreshing an offer cannot extend an accepted transaction or revive a revoked one.
+
 For hardware acceptance, start with both trainers independent and unloaded. Select
 the intended controller, open trainer selection, create Twin, and confirm the
 trainer screens and knob agree. Exit Twin and confirm independent state, then
@@ -47,6 +53,18 @@ TV bond but no TV connected. A physical Create/Exit cycle with Weight Training
 restored after both transitions passed on October 15. Other modes, role reversals,
 reconnect and unavailable-peer scenarios still need hardware coverage; host tests
 and a firmware build alone do not verify those Bluetooth transactions.
+
+On October 16 the mixed TV-button flow also passed: the TV released its direct
+VTR-126226 connection, the knob paired it with VTR-161230 as controller, and Weight
+Training returned automatically. Native creation plus restoration took 12.83
+seconds; exit plus mode restoration took 1.51 seconds. Both trainers stayed
+unloaded, configured settings were unchanged, and the TV restored its original
+direct peer connection and device numbers. The TV's uppercase offered MAC and
+knob's lowercase endpoint MAC now confirm without an additional timeout.
+The user subsequently confirmed on October 16 that knob-button Create Twin and
+Exit Twin also work. This is user-reported acceptance; the recorded diagnostics
+above cover TV-button initiation. Automatic exercise topology changes remain
+unverified on hardware.
 
 ## Installer verification without hardware
 

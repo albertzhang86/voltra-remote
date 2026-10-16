@@ -29,6 +29,13 @@ uint16_t lastId=0;
 uint32_t lastEpoch=0,lastSnapshot=0,pendingAt=0,pendingStamp=0;
 Command pendingCommand;
 bool pending=false;
+uint32_t offerEpoch=0,offerSession=0,offerDeadline=0;
+bool offerSeen=false,offerReady=false;
+char offeredPeer[18]{};
+uint16_t nextMixedRequest=1,mixedRequestId=0;
+uint32_t mixedRequestEpoch=0,mixedRequestSession=0,mixedRequestAt=0,lastMixedNotify=0;
+bool mixedRequestAccepted=false;
+char requestedPeer[18]{},mixedMessage[64]{};
 constexpr uint16_t fields[]={0x3e86,0x3e87,0x53b0,0x3e88,0x5362,0x5103,0x5350,0x5410,0x5411,0x5412,0x5413};
 
 // The peripheral's authenticated Secure Connections bond is the trust record.
@@ -81,6 +88,14 @@ bool editable(const vlink::DeviceState& s,int index,uint32_t now){
 }
 bool sameMode(int mode,int index){return index<4?mode==1:index==4?mode==2:index==5?mode==4:mode==7;}
 void sendResult(const Command& c,uint8_t code){uint8_t bytes[16];result(bytes,c,code);if(authenticated)updates->notify(bytes,sizeof(bytes),peer);}
+void clearMixedOffer(){offerDeadline=0;offeredPeer[0]=0;offerSeen=false;offerReady=false;
+ vlink::voltraLink.updateTvTwinOffer(0,0,0,nullptr,false);}
+void clearMixedRequest(){mixedRequestId=0;mixedRequestAccepted=false;requestedPeer[0]=0;}
+void notifyMixedRequest(){
+ uint8_t bytes[20];if(authenticated&&mixedRequestId&&twinRequest(bytes,mixedRequestEpoch,mixedRequestSession,mixedRequestId,requestedPeer)){
+   updates->notify(bytes,sizeof(bytes),peer);lastMixedNotify=millis();
+ }
+}
 
 class ServerCallbacks:public NimBLEServerCallbacks {
  void onConnect(NimBLEServer* s,NimBLEConnInfo& info) override {
@@ -148,18 +163,17 @@ void publish(const vlink::DeviceState& s,uint32_t now){
  uint8_t bytes[MAX_SNAPSHOT]{};bytes[0]=MAGIC;bytes[1]=VERSION;bytes[2]=1;
  const bool fresh=vlink::fresh(s,now);
  bytes[3]=(s.link==vlink::LinkState::Ready?1:0)|(fresh?2:0)|(busy(s,now)||pending?4:0)|
-   (vlink::endpointFresh(s,now)?8:0)|(s.endpoint.paired()?16:0);
+   (vlink::endpointFresh(s,now)?8:0)|(s.endpoint.paired()?16:0)|TWIN_IDENTITY_GUARD_FLAG|MIXED_TWIN_HANDOFF_FLAG;
  put32(bytes+4,epoch);put32(bytes+8,s.session);put32(bytes+12,now);
  bytes[16]=s.selected<0?255:s.selected;
  const int battery=board::batteryPercent();bytes[17]=battery<0?255:battery;bytes[18]=s.battery<0?255:s.battery;
  bytes[133]=board::usbPowerConnected()?USB_POWER_FLAG:0;
  bytes[19]=s.mode<0?255:s.mode;put16(bytes+20,s.fitnessMode<0?65535:s.fitnessMode);
- const bool independent=s.endpoint.independent();
  const auto activeWeight=vlink::activeWeightReading(s,now);
  const auto movingWeight=vlink::movingWeightReading(s,now);
  if(movingWeight.source==vlink::ActiveWeightSource::CableForce)writeMovingWeight(bytes,movingWeight.tenthsLb);
  else writeActiveWeight(bytes,activeWeight.tenthsLb);
- put16(bytes+26,fresh&&independent&&s.repMs?encodedRepCount(s.reps):65535);
+ put16(bytes+26,encodedRepCount(vlink::repetitionReading(s,now)));
  bytes[30]=fresh&&!busy(s,now)&&vlink::twinControlReady(s,now)&&vlink::canSwitch(s,now)&&voltra::fitnessModeUnloaded(s.fitnessMode);
  if(s.selected>=0&&s.selected<2){
    memcpy(bytes+32,s.trainers[s.selected].name,31);memcpy(bytes+64,s.trainers[s.selected].address,17);
@@ -175,13 +189,16 @@ void publish(const vlink::DeviceState& s,uint32_t now){
  if(s.selected>=0&&s.selected<2){
    const bool paired=s.endpoint.paired();
    const auto* candidate=paired?nullptr:vlink::nearbyTwinPeer(s,now);
+   const auto offer=mixedTwinOffer();
+   const bool handoff=!paired&&offer.available;
+   if(handoff)bytes[3]|=HANDOFF_CANDIDATE_FLAG;
    const auto& other=candidate?*candidate:s.trainers[1-s.selected];
-   const char* address=paired?s.endpoint.peer:other.address;
+   const char* address=paired?s.endpoint.peer:handoff?offer.peerAddress:other.address;
    const bool nameMatches=!strcasecmp(other.address,address);
    memcpy(bytes+82,nameMatches?other.name:"VOLTRA peer",nameMatches?31:11);
    memcpy(bytes+114,address,17);
    bytes[132]=paired&&s.endpoint.peerBattery>=0?s.endpoint.peerBattery:255;
-   bytes[133]|=(vlink::canChangeTwin(s,now,true)&&!pending&&ui::tvCanEdit()?1:0)|
+   bytes[133]|=((handoff||vlink::canChangeTwin(s,now,true))&&!pending&&ui::tvCanEdit()?1:0)|
      (vlink::canChangeTwin(s,now,false)&&!pending&&ui::tvCanEdit()?2:0)|weightUnitFlags(s.mode,s.weightUnitRaw);
  }
  if(server->getPeerMTU(peer)>=247)updates->notify(bytes,SNAPSHOT_BASE+count*6,peer);
@@ -248,9 +265,34 @@ bool trusted(){return trustedTv;}
 bool findingTrainers(){return windowOpen(discoveryUntil,millis());}
 bool pairing(){return windowOpen(pairUntil,millis());}
 int passkey(){return shownPasskey;}
+MixedTwinOffer mixedTwinOffer(){
+ MixedTwinOffer offer;const auto s=vlink::voltraLink.state();const uint32_t now=millis();
+ offer.pending=authenticated&&mixedRequestId&&mixedRequestEpoch==epoch&&mixedRequestSession==s.session;
+ offer.owned=authenticated&&trustedTv&&offeredPeer[0]&&offerEpoch==epoch&&offerSession==s.session;
+ offer.available=offer.owned&&offerReady&&static_cast<int32_t>(offerDeadline-now)>0&&vlink::twinSetupReady(s,now)&&s.endpoint.independent()&&
+   s.selected>=0&&strcasecmp(offeredPeer,s.trainers[s.selected].address);
+ strlcpy(offer.peerAddress,offer.pending?requestedPeer:offeredPeer,sizeof(offer.peerAddress));
+ strlcpy(offer.peerName,"TV-connected VOLTRA",sizeof(offer.peerName));
+ strlcpy(offer.message,mixedMessage,sizeof(offer.message));return offer;
+}
+bool canRequestMixedTwin(){const auto offer=mixedTwinOffer();return offer.available&&!offer.pending&&nextMixedRequest!=0;}
+bool requestMixedTwin(){
+ if(!canRequestMixedTwin())return false;
+ const auto s=vlink::voltraLink.state();mixedRequestId=nextMixedRequest++;
+ mixedRequestEpoch=epoch;mixedRequestSession=s.session;mixedRequestAt=millis();mixedRequestAccepted=false;
+ strlcpy(requestedPeer,offeredPeer,sizeof(requestedPeer));strlcpy(mixedMessage,"Waiting for TV",sizeof(mixedMessage));
+ notifyMixedRequest();return true;
+}
 void loop(){
  const uint32_t now=millis();const auto s=vlink::voltraLink.state();const uint32_t currentEpoch=epoch;
- if(currentEpoch!=lastEpoch){lastEpoch=currentEpoch;lastId=0;pending=false;/* Old queued requests fail the epoch check. */}
+ if(currentEpoch!=lastEpoch){lastEpoch=currentEpoch;lastId=0;pending=false;
+   clearMixedOffer();clearMixedRequest();nextMixedRequest=1;mixedMessage[0]=0;/* Old queued requests fail the epoch check. */}
+ if((offerSession!=s.session)||!authenticated)clearMixedOffer();
+ if(mixedRequestId&&(mixedRequestSession!=s.session||!authenticated)){clearMixedRequest();mixedMessage[0]=0;}
+ if(mixedRequestId&&now-mixedRequestAt>=(mixedRequestAccepted?90000u:8000u)){
+   clearMixedRequest();strlcpy(mixedMessage,"TV did not finish Twin; retry on TV",sizeof(mixedMessage));
+ }
+ if(mixedRequestId&&!mixedRequestAccepted&&now-lastMixedNotify>=750)notifyMixedRequest();
  if(forgettingTvs){
    if(peer==BLE_HS_CONN_HANDLE_NONE&&server->getConnectedCount()==0&&now-radioStoppedAt>=250)forgettingTvs=false;
    else return;
@@ -277,13 +319,25 @@ void loop(){
  }
  Command c;
  if(xQueueReceive(requests,&c,0)==pdTRUE){
-   if(pending||busy(s,now)||!validRequest(c,currentEpoch,s.session,lastId,now))sendResult(c,2);
+   if(c.type==7&&validOffer(c,currentEpoch,s.session,offerSeen,offerDeadline,now)){
+     offerEpoch=currentEpoch;offerSession=s.session;offerDeadline=c.deadline;offerSeen=true;offerReady=c.offerReady;
+     strlcpy(offeredPeer,c.expectedPeer,sizeof(offeredPeer));
+     vlink::voltraLink.updateTvTwinOffer(currentEpoch,s.session,c.deadline,c.expectedPeer,c.offerReady);
+   }else if(c.type==9&&validRequest(c,currentEpoch,s.session,lastId,now)){
+     lastId=c.id;
+     if(mixedRequestId==c.value&&mixedRequestEpoch==currentEpoch&&mixedRequestSession==s.session){
+       if(c.field==1){mixedRequestAccepted=true;strlcpy(mixedMessage,"Creating Twin via TV",sizeof(mixedMessage));}
+       else {clearMixedRequest();strlcpy(mixedMessage,c.field==2?"Twin connected":"Twin failed; check trainers and retry",sizeof(mixedMessage));}
+     }
+   }
+   else if(c.type==7||c.type==9){/* Expired offer/status cannot revive an old request. */}
+   else if(pending||busy(s,now)||!validRequest(c,currentEpoch,s.session,lastId,now))sendResult(c,2);
    else {
      lastId=c.id;int actual=-1;uint32_t stamp=s.statusMs;
      if(c.type==3)value(s,c.field,actual,stamp);
      const bool twin=c.type==5||c.type==6;
      if(twin)stamp=s.twinCompleted;
-     const bool accepted=twin?vlink::voltraLink.requestTwin(c.type==5,c.epoch,c.session,c.deadline):
+     const bool accepted=twin?vlink::voltraLink.requestTwin(c.type==5,c.epoch,c.session,c.deadline,c.expectedPeer,c.handoff):
        vlink::voltraLink.requestTvSetting(c.epoch,c.session,c.deadline,c.type==2,c.field,c.value);
      if(!accepted)sendResult(c,2);
      else{pending=true;pendingCommand=c;pendingAt=now;pendingStamp=stamp;sendResult(c,0);}

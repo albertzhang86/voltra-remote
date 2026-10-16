@@ -15,7 +15,7 @@
 LV_IMAGE_DECLARE(polar_bear_logo);
 namespace ui {
 namespace {
-constexpr int TRAINER_ROWS=2+vlink::NEARBY_TRAINER_LIMIT;
+constexpr int TRAINER_ROWS=3+vlink::NEARBY_TRAINER_LIMIT;
 lv_obj_t *trainerList,*connectionTools,*selectorCue,*discoverButton;
 bool toolsPage=false;
 int choiceSlots[TRAINER_ROWS];
@@ -30,6 +30,7 @@ lv_obj_t *tabs[4],*tabValues[4],*isoLabels[4],*modePanel;
 lv_obj_t *bandDetails,*damperRoman,*switchController,*switchControllerText;
 bool choosingController=false;
 uint32_t twinRequestRejectedUntil=0;
+bool twinActionViaTv=false;
 bool tvPage=false;
 lv_obj_t *tvPanel,*tvStatus,*tvPin,*tvButton,*tvPairButton,*tvButtonText,*tvFindButton,*tvForgetButton,*tvBackButton;
 lv_obj_t *managePanel,*manageRows[2],*manageNames[2],*manageButton;
@@ -49,6 +50,7 @@ int cableBaseline=-1,cableInitial=-1,cableHomeScreen=-1;
 bool cableScreenEntered=false;
 bool choosingMode=false,unloadGesture=false,initialModeHandled=false,fallbackModeMenu=false;
 int focusedMode=0;
+int modeMenuInitialMode=-1;
 int pendingSwipe=0;
 bool repaintView=true;
 constexpr int MODE_COUNT=4;
@@ -86,8 +88,9 @@ void setTextOpacity(lv_obj_t* obj,lv_opa_t opacity,lv_style_selector_t part){if(
 void setBgOpacity(lv_obj_t* obj,lv_opa_t opacity,lv_style_selector_t part){if(lv_obj_get_style_bg_opa(obj,part)!=opacity){lv_obj_set_style_bg_opa(obj,opacity,part);}}
 void setHidden(lv_obj_t* obj,bool hidden){if(hidden!=lv_obj_has_flag(obj,LV_OBJ_FLAG_HIDDEN)){if(hidden)lv_obj_add_flag(obj,LV_OBJ_FLAG_HIDDEN);else lv_obj_remove_flag(obj,LV_OBJ_FLAG_HIDDEN);}}
 bool pending(){for(const auto& e:isoEdits)if(e.pending)return true;if(bandEdit.pending||damperEdit.pending)return true;for(auto& e:edits)if(e.pending)return true;return false;}
-bool showTwinAction(const vlink::DeviceState& s,uint32_t now){
- if(s.endpoint.paired()||s.twinPending)return true;
+bool tvPeerProtected(const tvbridge::MixedTwinOffer& offer){return offer.owned||offer.pending;}
+bool showTwinAction(const vlink::DeviceState& s,uint32_t now,const tvbridge::MixedTwinOffer& offer){
+ if(s.endpoint.paired()||s.twinPending||tvPeerProtected(offer))return true;
  if(s.selected<0||s.selected>=2||!s.trainers[s.selected].address[0])return false;
  // Keep the action discoverable when TV radio use pauses advertisements.
  // Remembering a peer does not enable pairing: canChangeTwin still verifies it.
@@ -96,10 +99,12 @@ bool showTwinAction(const vlink::DeviceState& s,uint32_t now){
    if(vlink::nearbyAdvertisement(trainer,now)&&strcasecmp(trainer.address,s.trainers[s.selected].address))return true;
  return false;
 }
-const char* twinNotice(const vlink::DeviceState& s,uint32_t now,bool visible){
+const char* twinNotice(const vlink::DeviceState& s,uint32_t now,bool visible,const tvbridge::MixedTwinOffer& offer){
  if(!strcmp(s.message,"Saved slots full: Manage devices"))return "Saved slots full · Manage devices";
+ if(offer.pending)return offer.message[0]?offer.message:"Waiting for TV...";
  if(s.twinPending)return s.message;
  if(twinRequestRejectedUntil&&static_cast<int32_t>(twinRequestRejectedUntil-now)>0)return "Could not start · Try again";
+ if(!offer.available&&offer.message[0])return offer.message;
  if(s.twinCompleted&&!s.twinSucceeded)return s.message;
  if(!visible)return s.discoveryPausedForTv?"Swipe right · Find trainers":"Nearby trainers";
  if(!vlink::fresh(s,now))return "Connect a trainer first";
@@ -111,9 +116,16 @@ const char* twinNotice(const vlink::DeviceState& s,uint32_t now,bool visible){
  if(s.selected<0||s.selected>=2||strcasecmp(s.trainers[s.selected].address,s.endpoint.local))return "Verifying trainer identity...";
  if(s.mode!=0&&!mappedMode(s.mode))return "Exit current activity first";
  if(s.twinCompleted&&s.twinSucceeded&&s.mode==0)return s.message;
+ if(offer.available&&!s.endpoint.paired())return offer.message[0]?offer.message:"Ready with TV trainer";
+ if(offer.owned&&!s.endpoint.paired())return "Waiting for TV readiness...";
  if(!s.endpoint.paired()&&!vlink::nearbyTwinPeer(s,now))
    return s.discoveryPausedForTv?"Swipe right · Find trainers":"Find a second trainer to pair";
  return s.endpoint.paired()?"Twin connected":"Ready to create Twin";
+}
+bool canUseTwinAction(const vlink::DeviceState& s,uint32_t now,const tvbridge::MixedTwinOffer& offer){
+ if(pending()||loadSentMs||offer.pending)return false;
+ if(s.endpoint.paired())return vlink::canChangeTwin(s,now,false);
+ return offer.owned?tvbridge::canRequestMixedTwin():vlink::canChangeTwin(s,now,true);
 }
 lv_obj_t* label(lv_obj_t* parent,const char* text,int x,int y,const lv_font_t* font,uint32_t ink=theme::Text){
  auto* l=lv_label_create(parent);setText(l,text);setFont(l,font,0);setTextColor(l,color(ink),0);lv_obj_align(l,LV_ALIGN_TOP_MID,x,y);return l;
@@ -169,6 +181,8 @@ void choose(lv_event_t* event){
  if(code!=LV_EVENT_CLICKED)return;
  if(choicePressed[row]){choicePressed[row]=false;if(pressedChoiceSessions[row]!=s.session||strcmp(pressedChoiceAddresses[row],choiceAddresses[row]))return;}
  const int slot=choiceSlots[row];
+ const auto offer=tvbridge::mixedTwinOffer();
+ if(tvPeerProtected(offer)&&!strcasecmp(offer.peerAddress,choiceAddresses[row]))return;
  if(slot>=0&&strcmp(s.trainers[slot].address,choiceAddresses[row]))return;
  if(slot>=0&&(!vlink::trainerAvailable(s,slot,millis())||pairedChoice(s,slot,millis())))return;
  const bool selected=slot>=0?vlink::voltraLink.selectTrainer(slot):vlink::voltraLink.selectNearbyTrainer(choiceAddresses[row]);
@@ -216,6 +230,7 @@ void openModes(bool fallback=false){
  const auto state=vlink::voltraLink.state();
  if(state.loaded||state.armed||loadSentMs||pending()||(!fallback&&!vlink::canSwitch(state,millis())))return;
  choosingMode=true;loadGesture=false;unloadGesture=false;
+ modeMenuInitialMode=state.mode;
  focusedMode=0;const auto s=vlink::voltraLink.state();for(int i=0;i<MODE_COUNT;++i)if(modeIds[i]==s.mode)focusedMode=i;
  refreshModeIcons();lv_obj_remove_flag(modePanel,LV_OBJ_FLAG_HIDDEN);
 }
@@ -396,7 +411,12 @@ void begin(){
  switchControllerText=label(switchController,"Create Twin",0,0,&font_inter_16);lv_obj_remove_local_style_prop(switchControllerText,LV_STYLE_TEXT_COLOR,0);lv_obj_center(switchControllerText);lv_obj_add_flag(switchController,LV_OBJ_FLAG_HIDDEN);
  lv_obj_add_event_cb(switchController,[](lv_event_t*){
    const auto s=vlink::voltraLink.state();const uint32_t now=millis();
-   if(!pending()&&!loadSentMs&&vlink::canChangeTwin(s,now,!s.endpoint.paired()))
+   const auto offer=tvbridge::mixedTwinOffer();
+   if(pending()||loadSentMs||offer.pending)return;
+   if(!s.endpoint.paired()&&(twinActionViaTv||tvPeerProtected(offer))){
+     // A stale offer must fail closed, never become an unrelated local pairing request.
+     twinRequestRejectedUntil=tvbridge::canRequestMixedTwin()&&tvbridge::requestMixedTwin()?0:now+3000;
+   }else if(vlink::canChangeTwin(s,now,!s.endpoint.paired()))
      twinRequestRejectedUntil=vlink::voltraLink.requestTwin(!s.endpoint.paired())?0:now+3000;
  },LV_EVENT_CLICKED,nullptr);
  selectorCue=label(selector,"Swipe right for connections",0,310,&font_inter_12,theme::Muted);
@@ -497,7 +517,8 @@ void begin(){
  },1000,batteryText);
 }
 bool selectingTrainer(){return choosing;}
-bool tvCanEdit(){return !pending()&&!loadSentMs&&!choosingCable&&!choosingMode&&!splashActive&&!managingTrainers&&forgetTarget==ForgetTarget::None;}
+// Browsing the mode picker has no pending write; remote mode/setup commands remain available.
+bool tvCanEdit(){return !pending()&&!loadSentMs&&!choosingCable&&!splashActive&&!managingTrainers&&forgetTarget==ForgetTarget::None;}
 bool voiceAction(const voice::Event& event){
  static uint32_t releaseAt=0;static bool released=false;
  const uint32_t now=millis();const auto s=vlink::voltraLink.state();
@@ -560,10 +581,11 @@ void loop(){
  const bool live=vlink::fresh(s,now);
  if(bandSessionMode!=s.mode){bandSessionMode=s.mode;bandEdit.reset();damperEdit.reset();resetIso();}
  if(live&&s.mode==2&&s.modeValueMs[0]&&now-s.modeValueMs[0]<8000)bandEdit.observe(s.modeValues[0]);
- if(choosingMode&&(s.loaded||s.armed||loadSentMs))closeModes();
+ if(choosingMode&&(s.loaded||s.armed||loadSentMs||s.twinPending))closeModes();
  const bool mappedState=mappedMode(s.mode)&&(s.fitnessMode==4||voltra::fitnessModeLoaded(s.fitnessMode)||s.armed);
+ if(choosingMode&&live&&mappedState&&s.mode!=modeMenuInitialMode)closeModes();
  if(fallbackModeMenu&&live&&mappedState)closeModes();
- if(!choosing&&!splashActive&&live&&!mappedState&&!choosingCable&&!choosingMode){openModes(true);fallbackModeMenu=choosingMode;}
+ if(!choosing&&!splashActive&&live&&!mappedState&&!choosingCable&&!choosingMode&&!s.twinPending){openModes(true);fallbackModeMenu=choosingMode;}
  const int shownMode=live?s.mode:0;if(displayedMode!=shownMode){displayedMode=shownMode;lv_obj_invalidate(currentModeIcon);}
  lv_obj_add_flag(currentModeIcon,LV_OBJ_FLAG_HIDDEN);
  if(s.link==vlink::LinkState::Ready&&!s.parameterSelectionPending){
@@ -653,32 +675,40 @@ void loop(){
 
  if(s.selected>=0){const auto& selected=s.trainers[s.selected];snprintf(text,sizeof(text),"%s",selected.name[0]?selected.name:selected.address+9);setText(trainerLabel,text);}else setText(trainerLabel,"Choose Voltra  v");
  if(!vlink::twinActive(s,now))choosingController=false;
- const bool twinActionVisible=showTwinAction(s,now);
- setHidden(switchController,!twinActionVisible);setText(switchControllerText,s.twinPending?"Updating...":s.endpoint.paired()?"Exit Twin":"Create Twin");
+ const auto offer=tvbridge::mixedTwinOffer();
+ const bool twinActionVisible=showTwinAction(s,now,offer);
+ twinActionViaTv=!s.endpoint.paired()&&tvPeerProtected(offer);
+ setHidden(switchController,!twinActionVisible);setText(switchControllerText,s.twinPending||offer.pending?"Updating...":s.endpoint.paired()?"Exit Twin":"Create Twin");
  lv_obj_set_height(trainerList,twinActionVisible?144:200);
  if(tvCanEdit())lv_obj_remove_state(tvButton,LV_STATE_DISABLED);else lv_obj_add_state(tvButton,LV_STATE_DISABLED);
- if(vlink::canChangeTwin(s,now,!s.endpoint.paired())&&!pending()&&!loadSentMs)lv_obj_remove_state(switchController,LV_STATE_DISABLED);else lv_obj_add_state(switchController,LV_STATE_DISABLED);
- setText(selectorNotice,twinNotice(s,now,twinActionVisible));
+ if(canUseTwinAction(s,now,offer))lv_obj_remove_state(switchController,LV_STATE_DISABLED);else lv_obj_add_state(switchController,LV_STATE_DISABLED);
+ setText(selectorNotice,twinNotice(s,now,twinActionVisible,offer));
  int row=0;
  auto renderTrainer=[&](const vlink::Trainer& trainer,int slot){
    const bool saved=slot>=0,paired=saved&&pairedChoice(s,slot,now);
+   const bool onTv=tvPeerProtected(offer)&&!strcasecmp(trainer.address,offer.peerAddress);
    const bool available=saved?vlink::trainerAvailable(s,slot,now):vlink::nearbyAdvertisement(trainer,now);
    choiceSlots[row]=slot;strlcpy(choiceAddresses[row],trainer.address,sizeof(choiceAddresses[row]));
    setText(choiceLabels[row],trainer.name[0]?trainer.name:"Unnamed VOLTRA");
-   const char* subtitle=paired?"Paired":saved&&s.selected==slot&&vlink::twinActive(s,now)?"Control":
+   const char* subtitle=paired?"Paired":onTv?offer.pending?"Joining Twin...":"Connected to TV":saved&&s.selected==slot&&vlink::twinActive(s,now)?"Control":
      saved&&s.selected==slot&&(s.link==vlink::LinkState::Connecting||s.link==vlink::LinkState::Handshaking)?"Connecting...":
      saved&&s.selected==slot&&s.link==vlink::LinkState::Ready?"Connected":
      !saved?"New · Nearby":vlink::trainerNearby(s,slot,now)?"Saved · Nearby":available?"Saved · Reconnect":"Saved · Not detected";
    setText(choiceDetails[row],subtitle);
-   const bool disabled=paired||!available||((!saved||s.selected!=slot)&&(!vlink::canSwitch(s,now)||pending()||loadSentMs));
+   const bool disabled=paired||onTv||!available||((!saved||s.selected!=slot)&&(!vlink::canSwitch(s,now)||pending()||loadSentMs));
    if(disabled)lv_obj_add_state(choices[row],LV_STATE_DISABLED);else lv_obj_remove_state(choices[row],LV_STATE_DISABLED);
    setBgColor(choices[row],color(saved&&s.selected==slot?tint:theme::Surface),0);
    setTextColor(choiceLabels[row],color(disabled?theme::Muted:saved&&s.selected==slot?accent:theme::Text),0);
    lv_obj_align(choices[row],LV_ALIGN_TOP_MID,0,row*70);setHidden(choices[row],false);++row;
  };
  for(int slot=0;slot<2;++slot)if(s.trainers[slot].address[0])renderTrainer(s.trainers[slot],slot);
+ if(tvPeerProtected(offer)&&offer.peerAddress[0]){
+   bool saved=false;for(const auto& trainer:s.trainers)if(!strcasecmp(trainer.address,offer.peerAddress))saved=true;
+   if(!saved){vlink::Trainer peer;strlcpy(peer.address,offer.peerAddress,sizeof(peer.address));strlcpy(peer.name,offer.peerName,sizeof(peer.name));renderTrainer(peer,-1);}
+ }
  for(const auto& nearby:s.nearby){
    if(!vlink::nearbyAdvertisement(nearby,now))continue;
+   if(tvPeerProtected(offer)&&!strcasecmp(nearby.address,offer.peerAddress))continue;
    bool saved=false;for(const auto& trainer:s.trainers)if(!strcasecmp(trainer.address,nearby.address))saved=true;
    if(!saved)renderTrainer(nearby,-1);
  }

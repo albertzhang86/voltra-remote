@@ -28,12 +28,16 @@ void loop(){
  renderMaxUs=std::max(renderMaxUs,uint32_t(micros()-renderStart));
  // Bounded, read-only diagnostics for comparing the main readout with the TV.
  // Keep USB logging out of the BLE notification callback.
- static uint32_t lastWeightLog=0,lastMotionSample=0;
+ static uint32_t lastWeightLog=0,lastMotionSample=0,lastPairSample=0;
  if(now-lastWeightLog>=250&&Serial.availableForWrite()>=180){
    lastWeightLog=now;const auto s=vlink::voltraLink.state();
    if(s.motionMs&&s.motionMs!=lastMotionSample){
      lastMotionSample=s.motionMs;const auto moving=vlink::movingWeightReading(s,now);
      Serial.printf("[moving-weight] mode=%d fitness=%d forceTenthsLb=%d cableMm=%d velocityMmS=%d sampleAgeMs=%lu displayedTenthsLb=%d\n",s.mode,s.fitnessMode,s.activeWeightTenths,s.cableLengthMm,s.cableVelocityMmPerSecond,static_cast<unsigned long>(now-s.motionMs),moving.tenthsLb);
+   }
+   if(s.pairMotionMs&&s.pairMotionMs!=lastPairSample){
+     lastPairSample=s.pairMotionMs;const auto moving=vlink::movingWeightReading(s,now);
+     Serial.printf("[twin-weight] mode=%d fitness=%d combinedTenthsLb=%d moving=%u ageMs=%lu displayedTenthsLb=%d reps=%d\n",s.mode,s.fitnessMode,s.pairForceTenths,s.pairMoving,static_cast<unsigned long>(now-s.pairMotionMs),moving.tenthsLb,vlink::repetitionReading(s,now));
    }
  }
  static uint32_t lastLog=0;
