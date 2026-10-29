@@ -11,7 +11,7 @@ Standalone Bluetooth remote for up to two Beyond Power VOLTRA I trainers using t
 | Damper | Factor with Roman numeral level; tap factor to load/unload |
 | Isokinetic | Speed, Return type, eccentric speed/weight and limit; tap main value to load/unload |
 
-Cardio, Custom Curves and Isometric Test are excluded. When the trainer reports an unsupported mode or an unmapped fitness state while unloaded, the knob shows mode selection. Mode changes are blocked while loaded or armed. Some device settings screens reuse the same state as a training screen and cannot yet be distinguished.
+Cardio, Custom Curves and Isometric Test are excluded. Mode selection and motor state are read independently, including Firmware 2.0's unloaded/loaded reports. A supported, confirmed mode opens its controls even while unloaded. Unknown motor states remain read-only, and mode changes are blocked while loaded or armed. Some device settings screens reuse the same state as a training screen and cannot yet be distinguished.
 
 ## Controls
 
@@ -26,9 +26,9 @@ Cardio, Custom Curves and Isometric Test are excluded. When the trainer reports 
 
 ## Units and ranges
 
-The protocol uses integer pounds. Weight Training and its modifiers currently display kg on the observed device scale of 2.2 lb/kg, rounded to 0.5 kg. Band and Isokinetic weight fields follow the reported kg/lb setting; cable length follows cm/in. Weight Training automatic kg/lb matching is not complete.
+Weight fields follow the trainer's reported kg/lb preference, including Weight Training and its modifiers. Cable length follows cm/in; speed follows m/s or in/s. Preferences are read from VOLTRA, not fixed in the interface. Unknown preferences remain unavailable. Setpoints use integer pounds on the wire; the kg display follows the trainer's observed half-kg grid, while measured force uses SI conversion.
 
-Protocol limits used here: Weight 5–200 lb; Chains 0–100 lb; Eccentric −195 to +195 lb added weight; Band maximum 15–200 lb. Damper has ten factors: 5, 8, 11, 14, 17, 21, 30, 33, 41, 50. Isokinetic speed is 0.1–2.0 m/s; eccentric speed additionally permits Auto, eccentric weight 5–100 lb, and limit 5–200 lb. Dynamic accessory limits and 250 lb operation are not implemented. Trainer confirmation remains authoritative.
+Weight and Band use the trainer's reported allowed-force ceiling (`0x5314`), with minima of 5 lb and 15 lb respectively. Firmware 2.0 hardware reported a ceiling of 229 protocol pounds (104 kg on its display); a missing or unsupported report retains the conservative 200 lb ceiling. Eccentric bounds follow that ceiling, and base plus eccentric must remain within the allowed range. Chains remains 0–100 lb. Damper has ten factors: 5, 8, 11, 14, 17, 21, 30, 33, 41, 50. Isokinetic retains its separate limits: speed 0.1–2.0 m/s, eccentric speed additionally permits Auto, eccentric weight 5–100 lb, and limit 5–200 lb. A larger wire envelope does not authorize a setting beyond the connected trainer's limit.
 
 ## First connection and Twin Mode
 
@@ -36,8 +36,8 @@ Disconnect the trainer from Cortex, Beyond+ and any direct TV connection before
 selecting it on the knob. Each trainer accepts one controlling client at a time;
 closing another app's window may leave its Bluetooth connection active. An occupied
 connection can cause a timeout, but a timeout alone does not prove the cause.
-When using the TV, select **Via knob** so it connects to the knob's bridge instead
-of competing for the trainer. Accept the trainer's connection prompt if shown.
+For that trainer, select **Via knob** on the TV so it uses the bridge instead of
+competing for the trainer; a different trainer can remain connected directly to the TV. Accept the trainer's connection prompt if shown.
 The knob reads existing settings without automatically loading. It needs only USB
 power afterward; no computer or phone bridge is required. Disconnecting the knob
 does not unload a trainer.
@@ -50,6 +50,9 @@ nearby without a recent advertisement or a fresh active connection. When no TV i
 connected or pairing, tapping the trainer name to open selection starts a
 30-second discovery window. To search again, swipe right and use **Find nearby
 trainers**. An active TV connection must first be disconnected.
+Creating Twin with a saved second trainer does not require a new scan: **Create
+Twin** checks that exact trainer over a temporary connection while the TV stays
+connected. The saved row remains **Saved · Reconnect** until proximity is known.
 This avoids a reproduced ESP32 Bluetooth scheduler assertion (`sch_arb.c:517`)
 when the TV connects during scanning. A
 [related Espressif report](https://github.com/espressif/esp-idf/issues/18063)
@@ -57,20 +60,30 @@ describes the same assertion with concurrent peripheral connections and scanning
 the local crash log established this knob's failure. After the fix, the physical
 Google TV completed PIN pairing and authenticated, encrypted bridge telemetry.
 
-Select the intended controller, unload both machines, then open trainer selection
-and choose **Create Twin**. Pairing is enabled when exactly two distinct trainers
-are nearby and one is connected. A remembered peer keeps the action visible when
-unavailable, with a disabled button and a status message. A new peer can be saved
-in a free slot; occupied saved slots are never replaced.
+Select the intended controller, open trainer selection and choose **Create Twin**.
+An explicit Create/Exit request can start from a confirmed unloaded, loaded or
+known armed state in Weight Training, Resistance Band, Damper or Isokinetic.
+The flow automatically unloads affected trainers when necessary; users do not
+need to unload separately before pressing the button. Discovery chooses one
+unambiguous nearby peer while one trainer is connected. When TV radio use pauses
+discovery, the saved second trainer can instead be checked through its exact
+address. The action says **Checks saved second trainer**; it does not claim the
+trainer is nearby or ready before connecting. Missing or ambiguous candidates
+keep the action disabled with a status message.
+A new peer can be saved in a free slot; occupied saved slots are never replaced.
 
-The knob temporarily connects to the second trainer, verifies both identities and
-unloaded states, enters idle on both, and sends the controller's address to the
-peer. Weight Training, Resistance Band, Damper and Isokinetic can all start this
-flow while unloaded. Success requires acknowledgment plus matching native endpoint
-identities. **Exit Twin** confirms independent status and keeps the selected
-controller connected. The previous controller mode is restored only after the
-topology change is confirmed; a failed restoration prompts choosing a mode.
-Neither action loads/unloads a trainer or replays after a disconnect.
+The knob verifies the controller and temporarily connects to the exact second
+trainer. Both identities and supported states must be read before either trainer
+is changed. An unavailable or mismatched second trainer leaves the controller
+untouched. Each necessary unload sends one STOP and waits for a newer, matching
+native unloaded report. Only then can it enter idle and send the controller's
+address to the peer. A failed or unconfirmed unload cancels the topology change;
+unknown fitness states remain blocked. Success requires acknowledgment plus
+matching native endpoint identities. **Exit Twin** unloads the logical controller
+when needed, confirms independent status and keeps that controller connected.
+The previous controller mode is restored only after the topology change is
+confirmed; a failed restoration prompts choosing a mode. Successful manual
+Create/Exit leaves resistance unloaded; neither action sends GO or replays after a disconnect.
 
 Bluetooth replies may span several notifications after a Twin change. Controller
 and temporary-peer packets are assembled separately, checked against both packet
@@ -91,7 +104,7 @@ The local project toolchain is under `.tools/` and `.arduino/` (ignored by Git):
 ```sh
 tools/test.sh
 tools/build.sh
-python3 tools/preview.py  # optional: render actual LVGL UI on macOS
+python3 tools/preview.py  # required P0 touch/mode regression tests and LVGL renders
 ```
 
 `tools/setup.sh` installs the pinned local dependencies on a fresh Mac. Arduino's packaged ctags is Intel-only; setup builds its native source on Apple Silicon if necessary.
@@ -136,11 +149,25 @@ Forgetting never sends load, unload, or Twin commands.
 
 The TV follows the knob's selected trainer and can request the four mode/settings
 changes; the existing knob command gates and trainer confirmation remain authoritative.
-Local draft edits block TV changes. The bridge cannot load/unload, select a trainer,
-or start training. Bridge v2 supports Create/Exit Twin with verified roles and both
-batteries; its pair/exit request requires unloaded trainers and confirms idle before
-changing topology. Classified native Twin runtime counts and complete local/peer
-force samples now reach the TV as logical pair telemetry. Unsupported packet
+Local draft edits block TV changes. The TV cannot select a different knob trainer.
+Bridge v2 advertises explicit motor support and separate load/unload readiness.
+A load requires fresh confirmed mode, settings, controller identity, topology and
+cable zero, then a SETUP readback and unchanged settings before one GO. Unloading
+sends one STOP. Both operations require fresh native confirmation; command
+acknowledgment alone is insufficient, and motor commands are never retried.
+
+Explicit TV Create/Exit Twin requests use the same automatic-unload preparation
+as knob buttons. Request-capability flags can be advertised while loaded; native
+idle/pair commands still require confirmed unloaded participants. The TV app can
+apply a planned set's preset and load after its countdown, waiting for confirmation
+before starting set time and reps. Compatible already-loaded sets avoid redundant
+STOP/GO commands. Successful manual Twin actions remain unloaded; reconnecting never loads
+or resumes a workout by itself. Canceling an accepted TV motor or Twin operation
+revokes the command session before closing the bridge so remaining queued steps
+lose authority. Already transmitted commands cannot be claimed to be reversed.
+
+Classified native Twin runtime counts and complete local/peer force samples now
+reach the TV as logical pair telemetry. Unsupported packet
 families remain unavailable; a single cable reading is never doubled. Native Twin
 Weight Training live force and reps passed physical knob/TV verification on
 October 16; other modes and trainer firmware versions still need acceptance.
@@ -210,9 +237,18 @@ still requires physical validation. Native Twin variants use the separate pair
 path described above; unidentified `0xaa94` batches are not interpreted. The existing telemetry rate was
 already 10 Hz, so this change does not alter the rate or training settings. Bounded USB diagnostics enqueue
 one raw notification per family and print from the worker without blocking BLE.
-Bridge v2 also reports the knob's display unit in optional flags. Weight Training
-reports kg, matching the knob's half-kg setpoint grid (59 raw lb → 27 kg); Band,
-Damper and Isokinetic follow the unit read from VOLTRA. The active-weight field uses
+Snapshot v3 reports both display preferences read from VOLTRA in all modes.
+Twin setup shows one progress screen across intermediate idle states, handshakes
+and reconnects. TV-led preparation uses an authenticated, expiring display
+heartbeat; local Create/Exit Twin uses the native transaction lifetime. This
+display intent never changes control readiness. An Unload action remains
+available while the trainer reports loaded.
+Weight Training follows lb/kg rather than forcing kg; the kg setpoint grid is
+unchanged (59 raw lb → 27 kg). Cable/Band length uses cm/in, and speed uses m/s
+or in/s. Unknown units remain unavailable. The read-only `0x5314` allowed-force
+ceiling governs Weight/Band controls and load validation; unsupported reports
+retain the conservative 200 lb envelope. The observed Firmware 2.0 ceiling is
+229 raw lb (104 kg). Isokinetic retains its separate parameter limits. The active-weight field uses
 tenths of a pound on the wire, independent of the display preference. USB diagnostics
 include unit, measured force, target, runtime weight, and sample ages.
 
@@ -282,8 +318,10 @@ fixed 40-second limit and still cancels on explicit revocation, changed trainer
 identity/session, or TV disconnect. The known TV-owned peer remains protected
 from local connection until the TV releases it or the trusted session ends.
 
-Create Twin on either device uses the same handoff: the TV releases its trainer,
-the knob finds that exact peer, and the existing knob trainer becomes controller.
+Create Twin on either device uses the same handoff: the TV confirms automatic
+unloading of its connected participants, releases its direct trainer, and the knob
+verifies that exact peer. The existing knob trainer becomes controller. Firmware
+also confirms both trainers unloaded before any native topology write.
 The button sends a session-bound request to the TV; the offer alone never starts
 pairing. Repeated notifications cannot repeat the pairing command. Exit restores
 the former peer's direct TV connection when the TV still owns the handoff context.

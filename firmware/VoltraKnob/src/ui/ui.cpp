@@ -17,6 +17,7 @@ namespace ui {
 namespace {
 constexpr int TRAINER_ROWS=3+vlink::NEARBY_TRAINER_LIMIT;
 lv_obj_t *trainerList,*connectionTools,*selectorCue,*discoverButton;
+lv_obj_t *setupPanel,*setupLabel,*setupUnload;
 bool toolsPage=false;
 int choiceSlots[TRAINER_ROWS];
 char choiceAddresses[TRAINER_ROWS][18]{};
@@ -50,11 +51,12 @@ int cableBaseline=-1,cableInitial=-1,cableHomeScreen=-1;
 bool cableScreenEntered=false;
 bool choosingMode=false,unloadGesture=false,initialModeHandled=false,fallbackModeMenu=false;
 int focusedMode=0;
-int modeMenuInitialMode=-1;
+int modeMenuInitialMode=-1,requestedMode=-1;
+uint32_t modeRequestSession=0,modeRequestStarted=0,modeRequestRevision=0;
 int pendingSwipe=0;
 bool repaintView=true;
 constexpr int MODE_COUNT=4;
-lv_obj_t *modeIcons[MODE_COUNT],*modeCenter,*modeName,*currentModeIcon;
+lv_obj_t *modeIcons[MODE_COUNT],*modeCenter,*modeName,*modeNotice,*currentModeIcon;
 int displayedMode=0;
 const int modeIds[]={1,2,4,7};
 bool mappedMode(int mode){for(int id:modeIds)if(id==mode)return true;return false;}
@@ -68,7 +70,7 @@ void isoText(char* text,size_t size,const vlink::DeviceState& s,int index,const 
  if(!vlink::fresh(s,now)||!edit.known||!s.modeValueMs[index]||now-s.modeValueMs[index]>=8000){snprintf(text,size,"--");return;}
  if(index==8)snprintf(text,size,"%s",edit.target==0?"Speed":"Weight");
  else if(index==9&&edit.target==0)snprintf(text,size,"Auto");
- else if(index==7||index==9)snprintf(text,size,"%.1f",edit.target/1000.0);
+ else if(index==7||index==9){if(s.lengthUnitRaw==0||s.lengthUnitRaw==1)snprintf(text,size,"%.1f",edit.target/(s.lengthUnitRaw==1?25.4:1000.0));else snprintf(text,size,"--");}
  else if(s.weightUnitRaw==1)snprintf(text,size,"%.1f",remote::displayKilograms(edit.target));
  else if(s.weightUnitRaw==0)snprintf(text,size,"%d",edit.target);
  else snprintf(text,size,"--");
@@ -87,13 +89,13 @@ void setFont(lv_obj_t* obj,const lv_font_t* font,lv_style_selector_t part){if(lv
 void setTextOpacity(lv_obj_t* obj,lv_opa_t opacity,lv_style_selector_t part){if(lv_obj_get_style_text_opa(obj,part)!=opacity){lv_obj_set_style_text_opa(obj,opacity,part);}}
 void setBgOpacity(lv_obj_t* obj,lv_opa_t opacity,lv_style_selector_t part){if(lv_obj_get_style_bg_opa(obj,part)!=opacity){lv_obj_set_style_bg_opa(obj,opacity,part);}}
 void setHidden(lv_obj_t* obj,bool hidden){if(hidden!=lv_obj_has_flag(obj,LV_OBJ_FLAG_HIDDEN)){if(hidden)lv_obj_add_flag(obj,LV_OBJ_FLAG_HIDDEN);else lv_obj_remove_flag(obj,LV_OBJ_FLAG_HIDDEN);}}
-bool pending(){for(const auto& e:isoEdits)if(e.pending)return true;if(bandEdit.pending||damperEdit.pending)return true;for(auto& e:edits)if(e.pending)return true;return false;}
+bool pending(){if(requestedMode>=0)return true;for(const auto& e:isoEdits)if(e.pending)return true;if(bandEdit.pending||damperEdit.pending)return true;for(auto& e:edits)if(e.pending)return true;return false;}
 bool tvPeerProtected(const tvbridge::MixedTwinOffer& offer){return offer.owned||offer.pending;}
 bool showTwinAction(const vlink::DeviceState& s,uint32_t now,const tvbridge::MixedTwinOffer& offer){
  if(s.endpoint.paired()||s.twinPending||tvPeerProtected(offer))return true;
  if(s.selected<0||s.selected>=2||!s.trainers[s.selected].address[0])return false;
  // Keep the action discoverable when TV radio use pauses advertisements.
- // Remembering a peer does not enable pairing: canChangeTwin still verifies it.
+ // A saved peer can be checked over GATT while TV use pauses discovery.
  if(s.trainers[1-s.selected].address[0])return true;
  for(const auto& trainer:s.nearby)
    if(vlink::nearbyAdvertisement(trainer,now)&&strcasecmp(trainer.address,s.trainers[s.selected].address))return true;
@@ -108,7 +110,7 @@ const char* twinNotice(const vlink::DeviceState& s,uint32_t now,bool visible,con
  if(s.twinCompleted&&!s.twinSucceeded)return s.message;
  if(!visible)return s.discoveryPausedForTv?"Swipe right · Find trainers":"Nearby trainers";
  if(!vlink::fresh(s,now))return "Connect a trainer first";
- if(s.loaded||s.armed||!voltra::fitnessModeUnloaded(s.fitnessMode))return "Unload both trainers first";
+ if(!voltra::fitnessModeUnloaded(s.fitnessMode)&&!voltra::fitnessModeLoaded(s.fitnessMode)&&!voltra::fitnessModeArmed(s.fitnessMode))return "Reading trainer state...";
  if(s.cableActive)return "Close cable setup first";
  if(pending()||loadSentMs||s.parameterSelectionPending||
     (s.controlBusyUntil&&static_cast<int32_t>(s.controlBusyUntil-now)>0))return "Waiting for current change...";
@@ -116,16 +118,17 @@ const char* twinNotice(const vlink::DeviceState& s,uint32_t now,bool visible,con
  if(s.selected<0||s.selected>=2||strcasecmp(s.trainers[s.selected].address,s.endpoint.local))return "Verifying trainer identity...";
  if(s.mode!=0&&!mappedMode(s.mode))return "Exit current activity first";
  if(s.twinCompleted&&s.twinSucceeded&&s.mode==0)return s.message;
- if(offer.available&&!s.endpoint.paired())return offer.message[0]?offer.message:"Ready with TV trainer";
+ if(offer.available&&!s.endpoint.paired())return s.loaded||s.armed?"TV unloads both, then pairs":offer.message[0]?offer.message:"Ready with TV trainer";
  if(offer.owned&&!s.endpoint.paired())return "Waiting for TV readiness...";
  if(!s.endpoint.paired()&&!vlink::nearbyTwinPeer(s,now))
-   return s.discoveryPausedForTv?"Swipe right · Find trainers":"Find a second trainer to pair";
- return s.endpoint.paired()?"Twin connected":"Ready to create Twin";
+   return vlink::twinRequestPeer(s,now)?"Checks saved second trainer":
+     s.discoveryPausedForTv?"Swipe right · Find trainers":"Find a second trainer to pair";
+ return s.loaded||s.armed?"Unloads before changing Twin":s.endpoint.paired()?"Twin connected":"Ready to create Twin";
 }
 bool canUseTwinAction(const vlink::DeviceState& s,uint32_t now,const tvbridge::MixedTwinOffer& offer){
  if(pending()||loadSentMs||offer.pending)return false;
- if(s.endpoint.paired())return vlink::canChangeTwin(s,now,false);
- return offer.owned?tvbridge::canRequestMixedTwin():vlink::canChangeTwin(s,now,true);
+ if(s.endpoint.paired())return vlink::canRequestTwin(s,now,false);
+ return offer.owned?tvbridge::canRequestMixedTwin():vlink::canRequestTwin(s,now,true);
 }
 lv_obj_t* label(lv_obj_t* parent,const char* text,int x,int y,const lv_font_t* font,uint32_t ink=theme::Text){
  auto* l=lv_label_create(parent);setText(l,text);setFont(l,font,0);setTextColor(l,color(ink),0);lv_obj_align(l,LV_ALIGN_TOP_MID,x,y);return l;
@@ -196,6 +199,7 @@ void openSelector(lv_event_t*){
  if(!tvbridge::connected()&&!tvbridge::pairing())tvbridge::findTrainers();
 }
 void changePage(lv_event_t* e){
+ if(requestedMode>=0)return;
  if(vlink::voltraLink.state().mode==7){if(!pending())isoPage=static_cast<int>(reinterpret_cast<intptr_t>(lv_event_get_user_data(e)));loadGesture=false;return;}
  page=static_cast<int>(reinterpret_cast<intptr_t>(lv_event_get_user_data(e)));loadGesture=false;
  if(!pending()&&!loadSentMs&&vlink::voltraLink.requestParameter(static_cast<vlink::Parameter>(page)))edits[page].reset();
@@ -220,12 +224,28 @@ void actionEvent(lv_event_t* event){
 void refreshModeIcons(){
  setText(modeName,modeNames[focusedMode]);setTextColor(modeName,color(theme::modeAccent(modeIds[focusedMode])),0);
  for(int i=0;i<MODE_COUNT;++i){const uint32_t ink=theme::modeAccent(modeIds[i]);
-  setBgColor(modeIcons[i],color(i==focusedMode?theme::modeTint(ink):theme::Surface),0);
+  setBgColor(modeIcons[i],color(i==focusedMode?theme::modeTint(ink):requestedMode>=0?theme::SurfaceLow:theme::Surface),0);
   lv_obj_set_style_border_color(modeIcons[i],color(ink),0);lv_obj_set_style_border_width(modeIcons[i],i==focusedMode?2:0,0);
+  if(requestedMode>=0)lv_obj_add_state(modeIcons[i],LV_STATE_DISABLED);else lv_obj_remove_state(modeIcons[i],LV_STATE_DISABLED);
  }
+ if(requestedMode>=0)lv_obj_add_state(modeCenter,LV_STATE_DISABLED);else lv_obj_remove_state(modeCenter,LV_STATE_DISABLED);
  lv_obj_set_style_border_color(modeCenter,color(theme::modeAccent(modeIds[focusedMode])),0);lv_obj_invalidate(modeCenter);
 }
-void closeModes(){fallbackModeMenu=false;choosingMode=false;loadGesture=false;unloadGesture=false;lv_obj_add_flag(modePanel,LV_OBJ_FLAG_HIDDEN);}
+void closeModes(){requestedMode=-1;fallbackModeMenu=false;choosingMode=false;loadGesture=false;unloadGesture=false;setText(modeNotice,"");lv_obj_add_flag(modePanel,LV_OBJ_FLAG_HIDDEN);}
+bool usableMode(const vlink::DeviceState& s){return vlink::modeConfirmed(s,millis());}
+void observeModeRequest(const vlink::DeviceState& s,uint32_t now){
+ if(requestedMode<0)return;
+ if(s.session!=modeRequestSession||s.link!=vlink::LinkState::Ready){
+   requestedMode=-1;setText(modeNotice,"Connection lost");refreshModeIcons();
+ }else if(s.modeRevision!=modeRequestRevision&&s.mode==requestedMode&&usableMode(s)){
+   page=0;closeModes();
+ }else if(now-modeRequestStarted>=6000&&
+          (!s.controlBusyUntil||static_cast<int32_t>(now-s.controlBusyUntil)>=0)){
+   // The worker can remain busy for ten seconds after an unconfirmed command.
+   // Offer retry only when a new tap can actually be admitted.
+   requestedMode=-1;setText(modeNotice,"Try again");refreshModeIcons();
+ }
+}
 void openModes(bool fallback=false){
  const auto state=vlink::voltraLink.state();
  if(state.loaded||state.armed||loadSentMs||pending()||(!fallback&&!vlink::canSwitch(state,millis())))return;
@@ -235,14 +255,22 @@ void openModes(bool fallback=false){
  refreshModeIcons();lv_obj_remove_flag(modePanel,LV_OBJ_FLAG_HIDDEN);
 }
 void selectMode(lv_event_t* event){
+ if(requestedMode>=0)return;
  const int index=static_cast<int>(reinterpret_cast<intptr_t>(lv_event_get_user_data(event)));
  if(index>=MODE_COUNT)return;
  if(index>=0)focusedMode=index;
  refreshModeIcons();
  const auto s=vlink::voltraLink.state();
  // Confirming the existing mode is navigation only, even when loaded/busy.
- if(vlink::fresh(s,millis())&&s.mode==modeIds[focusedMode]){page=0;closeModes();return;}
- if(!pending()&&!loadSentMs&&vlink::voltraLink.requestMode(modeIds[focusedMode])){page=0;closeModes();}
+ if(vlink::fresh(s,millis())&&s.mode==modeIds[focusedMode]&&usableMode(s)){page=0;closeModes();return;}
+ if(!pending()&&!loadSentMs&&vlink::voltraLink.requestMode(modeIds[focusedMode])){
+   requestedMode=modeIds[focusedMode];modeRequestSession=s.session;modeRequestStarted=millis();modeRequestRevision=s.modeRevision;
+   loadGesture=false;unloadGesture=false;setText(modeNotice,"Starting...");refreshModeIcons();
+   // Queue acceptance is not device confirmation. Keep this panel visible while
+   // old/idle readbacks arrive, then leave it on a fresh selected-mode report.
+   // Motor readiness is checked separately when editing or loading.
+   observeModeRequest(vlink::voltraLink.state(),millis());
+ }else setText(modeNotice,"Try again");
 }
 void closeCable(){
  if(cableRequested&&vlink::voltraLink.state().link==vlink::LinkState::Ready&&!vlink::voltraLink.requestCable(false))return;
@@ -257,7 +285,7 @@ void openCable(){
  lv_obj_remove_flag(cablePanel,LV_OBJ_FLAG_HIDDEN);
 }
 void navigateSwipe(int direction){
- if(splashActive)return;
+ if(splashActive||requestedMode>=0)return;
  loadGesture=false;unloadGesture=false;
  if(choosing){
    if(direction>0&&!toolsPage){toolsPage=true;setHidden(connectionTools,false);}
@@ -282,7 +310,8 @@ void iconDraw(lv_event_t* event){
  const int index=static_cast<int>(reinterpret_cast<intptr_t>(lv_event_get_user_data(event)));
  const int mode=index==-2?displayedMode:modeIds[index<0?focusedMode:index];
  lv_area_t bounds;lv_obj_get_coords(static_cast<lv_obj_t*>(lv_event_get_target(event)),&bounds);
- drawModeIcon(lv_event_get_layer(event),bounds,mode,color(theme::modeAccent(mode)));
+ const uint32_t ink=requestedMode>=0&&index>=0&&index!=focusedMode?theme::dimColor(theme::Muted):theme::modeAccent(mode);
+ drawModeIcon(lv_event_get_layer(event),bounds,mode,color(ink));
 }
 }
 // Track displacement before LVGL hit-testing so slow swipes and drags that
@@ -377,11 +406,15 @@ void begin(){
   const int x=static_cast<int>(std::lround(modeRadius*std::cos(angle)));
   const int y=modeCenterY+static_cast<int>(std::lround(modeRadius*std::sin(angle)))-32;
   modeIcons[i]=button(modePanel,64,64,x,y,theme::Surface);lv_obj_set_style_radius(modeIcons[i],LV_RADIUS_CIRCLE,0);
+  // Keep our dark palette while waiting; LVGL's disabled filter turns every
+  // button light grey and makes the whole picker appear highlighted.
+  lv_obj_set_style_color_filter_opa(modeIcons[i],LV_OPA_TRANSP,LV_STATE_DISABLED);
   lv_obj_set_style_pad_all(modeIcons[i],0,0);lv_obj_remove_flag(modeIcons[i],LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_add_event_cb(modeIcons[i],iconDraw,LV_EVENT_DRAW_MAIN,reinterpret_cast<void*>(static_cast<intptr_t>(i)));
   lv_obj_add_event_cb(modeIcons[i],selectMode,LV_EVENT_CLICKED,reinterpret_cast<void*>(static_cast<intptr_t>(i)));
  }
  modeCenter=button(modePanel,112,112,0,modeCenterY-56,theme::SurfaceLow);lv_obj_set_style_radius(modeCenter,LV_RADIUS_CIRCLE,0);lv_obj_set_style_border_width(modeCenter,2,0);
+ lv_obj_set_style_color_filter_opa(modeCenter,LV_OPA_TRANSP,LV_STATE_DISABLED);
  // Center the icon + 4px gap + actual label height as one group. The label's
  // center is 20px below the group's center for either one or two text lines.
  modeName=label(modeCenter,"Weight\nTraining",0,0,&font_inter_14);lv_obj_set_width(modeName,102);lv_obj_set_style_text_align(modeName,LV_TEXT_ALIGN_CENTER,0);lv_obj_align(modeName,LV_ALIGN_CENTER,0,20);
@@ -389,6 +422,7 @@ void begin(){
  lv_obj_add_event_cb(modeCenter,[](lv_event_t* e){lv_area_t a,text;lv_obj_get_coords(static_cast<lv_obj_t*>(lv_event_get_target(e)),&a);lv_obj_get_coords(modeName,&text);a.y2=text.y1-5;a.y1=a.y2-35;drawModeIcon(lv_event_get_layer(e),a,modeIds[focusedMode],color(theme::modeAccent(modeIds[focusedMode])));},LV_EVENT_DRAW_MAIN,nullptr);
  lv_obj_add_event_cb(modeCenter,selectMode,LV_EVENT_CLICKED,reinterpret_cast<void*>(static_cast<intptr_t>(-1)));
  lv_obj_set_ext_click_area(modeCenter,10);
+ modeNotice=label(modePanel,"",0,242,&font_inter_12,theme::Muted);
  refreshModeIcons();
  lv_obj_add_flag(modePanel,LV_OBJ_FLAG_HIDDEN);
  selector=lv_obj_create(screen);lv_obj_set_size(selector,360,360);lv_obj_center(selector);setBgColor(selector,color(theme::Background),0);lv_obj_set_style_border_width(selector,0,0);lv_obj_set_style_pad_all(selector,0,0);lv_obj_remove_flag(selector,LV_OBJ_FLAG_SCROLLABLE);
@@ -416,7 +450,7 @@ void begin(){
    if(!s.endpoint.paired()&&(twinActionViaTv||tvPeerProtected(offer))){
      // A stale offer must fail closed, never become an unrelated local pairing request.
      twinRequestRejectedUntil=tvbridge::canRequestMixedTwin()&&tvbridge::requestMixedTwin()?0:now+3000;
-   }else if(vlink::canChangeTwin(s,now,!s.endpoint.paired()))
+   }else if(vlink::canRequestTwin(s,now,!s.endpoint.paired()))
      twinRequestRejectedUntil=vlink::voltraLink.requestTwin(!s.endpoint.paired())?0:now+3000;
  },LV_EVENT_CLICKED,nullptr);
  selectorCue=label(selector,"Swipe right for connections",0,310,&font_inter_12,theme::Muted);
@@ -485,6 +519,23 @@ void begin(){
  lv_anim_t reveal;lv_anim_init(&reveal);lv_anim_set_var(&reveal,splash);lv_anim_set_values(&reveal,255,0);lv_anim_set_delay(&reveal,1500);lv_anim_set_duration(&reveal,350);
  lv_anim_set_exec_cb(&reveal,[](void* object,int32_t opacity){lv_obj_set_style_opa(static_cast<lv_obj_t*>(object),opacity,0);});
  lv_anim_set_completed_cb(&reveal,[](lv_anim_t* a){splashActive=false;lv_obj_delete(static_cast<lv_obj_t*>(a->var));});lv_anim_start(&reveal);
+ // One persistent operation covers handshakes, temporary idle and reconnection.
+ setupPanel=lv_obj_create(lv_layer_top());lv_obj_set_size(setupPanel,360,360);lv_obj_center(setupPanel);
+ setBgColor(setupPanel,color(theme::Background),0);lv_obj_set_style_bg_opa(setupPanel,LV_OPA_COVER,0);
+ lv_obj_set_style_border_width(setupPanel,0,0);lv_obj_set_style_pad_all(setupPanel,0,0);
+ lv_obj_remove_flag(setupPanel,LV_OBJ_FLAG_SCROLLABLE);setHidden(setupPanel,true);
+ auto* progress=lv_spinner_create(setupPanel);lv_obj_set_size(progress,58,58);
+ lv_obj_align(progress,LV_ALIGN_TOP_MID,0,90);lv_spinner_set_anim_params(progress,1200,90);
+ lv_obj_set_style_arc_color(progress,color(theme::Muted),LV_PART_MAIN);
+ lv_obj_set_style_arc_color(progress,color(theme::Lime),LV_PART_INDICATOR);
+ setupLabel=label(setupPanel,"",0,170,&font_inter_20,theme::Text);
+ label(setupPanel,"Please wait",0,201,&font_inter_14,theme::Muted);
+ setupUnload=button(setupPanel,220,44,0,235,theme::Surface);
+ lv_obj_center(label(setupUnload,"Unload",0,0,&font_inter_16,theme::Text));
+ lv_obj_add_event_cb(setupUnload,[](lv_event_t*){
+   const auto s=vlink::voltraLink.state();
+   vlink::voltraLink.requestUnload(s.session,vlink::UnloadSource::Touch);
+ },LV_EVENT_CLICKED,nullptr);
  // Top layer keeps the knob battery visible above every page and the splash.
  auto* battery=lv_obj_create(lv_layer_top());lv_obj_remove_style_all(battery);
  lv_obj_set_size(battery,66,18);lv_obj_align(battery,LV_ALIGN_TOP_MID,0,8);
@@ -523,6 +574,7 @@ bool voiceAction(const voice::Event& event){
  static uint32_t releaseAt=0;static bool released=false;
  const uint32_t now=millis();const auto s=vlink::voltraLink.state();
  const bool controlPage=!choosing&&!choosingMode&&!choosingCable&&!splashActive;
+ if(tvbridge::setupActivity()!=remote::SetupActivity::None&&event.kind!=voice::EventKind::Release)return false;
  if(!voice::canAct(event,s,now,controlPage,pending(),loadSentMs!=0,released&&now-releaseAt<1500))return false;
  loadGesture=false;unloadGesture=false;
  if(event.kind==voice::EventKind::Release){
@@ -533,6 +585,20 @@ bool voiceAction(const voice::Event& event){
  loadSentMs=now;return true;
 }
 void loop(){
+ const auto setup=tvbridge::setupActivity();
+ const bool settingUp=setup!=remote::SetupActivity::None&&!splashActive;
+ setHidden(setupPanel,!settingUp);
+ if(settingUp){
+   board::setRingColor(theme::dimColor(theme::Lime));
+   setText(setupLabel,remote::setupActivityLabel(setup));
+   const auto s=vlink::voltraLink.state();
+   setHidden(setupUnload,!s.loaded&&!s.armed);
+   lv_obj_add_state(switchController,LV_STATE_DISABLED);
+   setText(selectorNotice,remote::setupActivityLabel(setup));
+   loadGesture=false;unloadGesture=false;pendingSwipe=0;
+   board::RotateEvent ignored;while(board::pollRotate(ignored)){}
+   return;
+ }
  if(forgetTarget!=ForgetTarget::None){
    board::RotateEvent ignored;while(board::pollRotate(ignored)){}
    const auto s=vlink::voltraLink.state();
@@ -578,13 +644,17 @@ void loop(){
  }
  const uint32_t now=millis();const auto s=vlink::voltraLink.state();
  if(s.session!=session){choosingController=false;twinRequestRejectedUntil=0;initialModeHandled=false;closeModes();session=s.session;dialPulseMs=0;choosingCable=false;cableRequested=false;lv_obj_add_flag(cablePanel,LV_OBJ_FLAG_HIDDEN);for(auto& e:edits)e.reset();bandEdit.reset();damperEdit.reset();resetIso();loadGesture=false;loadSentMs=0;}
- const bool live=vlink::fresh(s,now);
+ const bool live=vlink::fresh(s,now)&&vlink::modeReportFresh(s,now);
+ observeModeRequest(s,now);
  if(bandSessionMode!=s.mode){bandSessionMode=s.mode;bandEdit.reset();damperEdit.reset();resetIso();}
  if(live&&s.mode==2&&s.modeValueMs[0]&&now-s.modeValueMs[0]<8000)bandEdit.observe(s.modeValues[0]);
- if(choosingMode&&(s.loaded||s.armed||loadSentMs||s.twinPending))closeModes();
- const bool mappedState=mappedMode(s.mode)&&(s.fitnessMode==4||voltra::fitnessModeLoaded(s.fitnessMode)||s.armed);
- if(choosingMode&&live&&mappedState&&s.mode!=modeMenuInitialMode)closeModes();
- if(fallbackModeMenu&&live&&mappedState)closeModes();
+ if(choosingMode&&(s.loaded||s.armed||loadSentMs||s.twinPending)){
+   if(s.loaded||s.armed){page=0;isoPage=0;} // Expose unloading even when the picker opened from a modifier.
+   closeModes();
+ }
+ const bool mappedState=usableMode(s);
+ if(requestedMode<0&&choosingMode&&live&&mappedState&&s.mode!=modeMenuInitialMode)closeModes();
+ if(requestedMode<0&&fallbackModeMenu&&live&&mappedState)closeModes();
  if(!choosing&&!splashActive&&live&&!mappedState&&!choosingCable&&!choosingMode&&!s.twinPending){openModes(true);fallbackModeMenu=choosingMode;}
  const int shownMode=live?s.mode:0;if(displayedMode!=shownMode){displayedMode=shownMode;lv_obj_invalidate(currentModeIcon);}
  lv_obj_add_flag(currentModeIcon,LV_OBJ_FLAG_HIDDEN);
@@ -594,15 +664,15 @@ void loop(){
    }
    if(vlink::chainWeight(s,false)>=0)edits[1].observe(vlink::chainWeight(s,false));
    if(vlink::chainWeight(s,true)>=0)edits[3].observe(vlink::chainWeight(s,true));
-   if(s.eccentricLbs>=-195)edits[2].observe(s.eccentricLbs);
+   if(s.eccentricLbs>=-245)edits[2].observe(s.eccentricLbs);
  }
  if(live&&s.mode==4&&s.modeValueMs[5]&&now-s.modeValueMs[5]<5000&&s.modeValues[5]>=0&&s.modeValues[5]<=9)damperEdit.observe(s.modeValues[5]);
  for(int i=7;i<=11;++i)if(live&&s.mode==7&&s.modeValueMs[i]&&now-s.modeValueMs[i]<8000&&voltra::validIsokineticSetting(i,s.modeValues[i]))isoEdits[i-7].observe(s.modeValues[i]);
- const bool allowed=!s.parameterSelectionPending&&vlink::canEditParameter(s,now,static_cast<vlink::Parameter>(page))&&!loadSentMs;
+ const bool allowed=(s.weightUnitRaw==0||s.weightUnitRaw==1)&&!s.parameterSelectionPending&&vlink::canEditParameter(s,now,static_cast<vlink::Parameter>(page))&&!loadSentMs;
  board::RotateEvent ev;
  while(board::pollRotate(ev))if(!choosing&&!splashActive){
   if(choosingCable)continue;
-  if(choosingMode){focusedMode=(focusedMode+(ev.direction>0?1:MODE_COUNT-1))%MODE_COUNT;refreshModeIcons();}
+  if(choosingMode){if(requestedMode<0){focusedMode=(focusedMode+(ev.direction>0?1:MODE_COUNT-1))%MODE_COUNT;refreshModeIcons();}}
   else if(s.mode==7){
    const int index=isoIndex(s,isoPage);auto& e=isoEdits[index-7];
    if(vlink::canEditIsokinetic(s,now,index)&&!loadSentMs&&e.known&&!e.sent&&(!s.controlBusyUntil||static_cast<int32_t>(now-s.controlBusyUntil)>=0)){
@@ -624,12 +694,12 @@ void loop(){
   else if(s.mode==2){
    if(vlink::canEditBand(s,now)&&bandEdit.known&&!bandEdit.sent){
     const int before=bandEdit.target;
-    if(s.weightUnitRaw==1)bandEdit.turn(ev.direction,true,false,ev.ms,15,200);
-    else{bandEdit.target=std::max(15,std::min(200,bandEdit.target+ev.direction));bandEdit.pending=bandEdit.target!=bandEdit.confirmed;bandEdit.changedMs=ev.ms;bandEdit.timedOut=false;}
+    if(s.weightUnitRaw==1)bandEdit.turn(ev.direction,true,false,ev.ms,15,vlink::maximumWeight(s));
+    else{bandEdit.target=std::max(15,std::min(vlink::maximumWeight(s),bandEdit.target+ev.direction));bandEdit.pending=bandEdit.target!=bandEdit.confirmed;bandEdit.changedMs=ev.ms;bandEdit.timedOut=false;}
     if(before!=bandEdit.target)dialPulseMs=now;
    }
   }
-  else {const int before=edits[page].target;edits[page].turn(ev.direction,allowed,false,ev.ms,page==0?5:page==2?-195:0,page==0?200:page==2?195:100);if(edits[page].target!=before)dialPulseMs=now;
+  else {const int before=edits[page].target;edits[page].turn(ev.direction,allowed,false,ev.ms,page==0?5:page==2?5-vlink::maximumWeight(s):0,page==0?vlink::maximumWeight(s):page==2?vlink::maximumWeight(s)-5:100,page==0,s.weightUnitRaw==0);if(edits[page].target!=before)dialPulseMs=now;
    board::traceDial(allowed?"input":"input-blocked",page,ev.direction,before,edits[page].target,edits[page].confirmed,edits[page].pending,edits[page].sent,ev.ms);
   }
  }
@@ -646,7 +716,7 @@ void loop(){
    else{board::traceDial("not-queued",i,0,e.target,e.target,e.confirmed,e.pending,e.sent,now);e.cancel();}}
   const int before=e.target;e.tick(now);if(before!=e.target)board::traceDial("timeout",i,0,before,e.target,e.confirmed,e.pending,e.sent,now);
  }
- if(loadSentMs && ((live&&(s.loaded||s.armed))||now-loadSentMs>5000))loadSentMs=0;
+ if(loadSentMs && ((live&&(s.loaded||s.armed))||(!s.motorPending&&s.motorCompleted&&s.motorFailure!=vlink::MotorFailure::None)||now-loadSentMs>5000))loadSentMs=0;
  static int lastView=-1;const int view=(splashActive?1:0)|(choosing?2:0)|(choosingMode?4:0)|(choosingCable?8:0);
  if(view!=lastView){lastView=view;repaintView=true;}
  if(now-lastRender<20)return;lastRender=now;
@@ -714,7 +784,7 @@ void loop(){
  }
  if(!row){choiceSlots[0]=-1;choiceAddresses[0][0]=0;setText(choiceLabels[0],"No trainers nearby");setText(choiceDetails[0],s.discoveryPausedForTv?"Open connections to find trainers":"Searching...");lv_obj_add_state(choices[0],LV_STATE_DISABLED);setHidden(choices[0],false);row=1;}
  for(;row<TRAINER_ROWS;++row)setHidden(choices[row],true);
- const char* state=s.link==vlink::LinkState::Scanning?"SEARCHING":s.link==vlink::LinkState::Connecting?"CONNECTING":s.link==vlink::LinkState::Handshaking?"ACCEPT ON VOLTRA":!live?"STATE UNAVAILABLE":s.loaded?(s.mode==3?"RUNNING":"LOADED"):s.armed?"AUTO LOAD ACTIVE":s.mode==0?"IDLE":s.fitnessMode==4?"UNLOADED":"NOT READY";
+ const char* state=s.link==vlink::LinkState::Scanning?"SEARCHING":s.link==vlink::LinkState::Connecting?"CONNECTING":s.link==vlink::LinkState::Handshaking?"ACCEPT ON VOLTRA":!live?"STATE UNAVAILABLE":s.loaded?(s.mode==3?"RUNNING":"LOADED"):s.armed?"AUTO LOAD ACTIVE":s.mode==0?"IDLE":voltra::fitnessModeReady(s.fitnessMode)?"UNLOADED":"NOT READY";
  setText(status,state);setTextColor(status,color(live&&(s.loaded||s.armed)?accent:theme::Muted),0);
  const bool band=live&&s.mode==2,damper=live&&s.mode==4,iso=live&&s.mode==7;
  auto& edit=edits[page];
@@ -722,25 +792,28 @@ void loop(){
  // replaces the primary readout; modifier pages keep their own value and units.
  const bool primaryPage=band||damper||(iso?isoPage==0:page==0);
  const auto readout=remote::trainingReadout(s,now,primaryPage,pending()||loadSentMs);
- const bool readoutPounds=s.mode!=1&&s.weightUnitRaw==0;
- const char* readoutUnit=readoutPounds?"lbs":"kg";
- auto formatLiveWeight=[&]{snprintf(text,sizeof(text),"%.1f",readoutPounds?
+ const bool readoutPounds=s.weightUnitRaw==0;
+ const bool weightUnitKnown=s.weightUnitRaw==0||s.weightUnitRaw==1;
+ const char* readoutUnit=readoutPounds?"lb":weightUnitKnown?"kg":"";
+ auto formatLiveWeight=[&]{if(!weightUnitKnown){snprintf(text,sizeof(text),"--");return;}snprintf(text,sizeof(text),"%.1f",readoutPounds?
    readout.forceTenthsLb/10.0:remote::telemetryKilograms(readout.forceTenthsLb));};
  bool numberChanged=false;
  if(!band&&!damper&&!iso){
  if(readout.liveWeight)formatLiveWeight();
- else if(!live||!edit.known||s.mode!=1||(s.twinConnection==2&&!vlink::twinActive(s,now)))snprintf(text,sizeof(text),"--");else snprintf(text,sizeof(text),"%.1f",remote::displayWeightKilograms(edit.target,vlink::twinActive(s,now)));
+ else if(!live||!edit.known||!weightUnitKnown||s.mode!=1||(s.twinConnection==2&&!vlink::twinActive(s,now)))snprintf(text,sizeof(text),"--");else if(readoutPounds)snprintf(text,sizeof(text),"%d",edit.target*(vlink::twinActive(s,now)?2:1));else snprintf(text,sizeof(text),"%.1f",page==0?remote::displayBaseWeightKilograms(edit.target,vlink::twinActive(s,now)):remote::displayWeightKilograms(edit.target,vlink::twinActive(s,now)));
  const bool dialing=dialPulseMs&&now-dialPulseMs<500;
  const auto* numberFont=dialing?&font_inter_80:&font_inter_72;
  numberChanged=strcmp(lv_label_get_text(number),text)||lv_obj_get_style_text_font(number,0)!=numberFont;
  setFont(number,numberFont,0);
  if(numberChanged)lv_obj_align(number,LV_ALIGN_TOP_MID,0,dialing?100:106);
- setText(number,text);setText(unit,"kg");
+ setText(number,text);setText(unit,readoutUnit);
  }
  const bool showTwin=vlink::twinActive(s,now);
  if(showTwin==lv_obj_has_flag(twinIcon,LV_OBJ_FLAG_HIDDEN)){if(showTwin)lv_obj_remove_flag(twinIcon,LV_OBJ_FLAG_HIDDEN);else lv_obj_add_flag(twinIcon,LV_OBJ_FLAG_HIDDEN);}
  static int lastTwin=-1;const int twinLayout=(showTwin?1:0)|(damper?2:band?4:iso?8:0);if(lastTwin!=twinLayout){lastTwin=twinLayout;lv_obj_align(unit,LV_ALIGN_TOP_MID,showTwin?-15:0,band?190:damper?222:181);lv_obj_align(twinIcon,LV_ALIGN_TOP_MID,band?48:damper?48:iso?42:17,band?191:damper?224:183);}
 
+ static int lastScaleMaximum=-1;const int scaleMaximum=(s.mode==1||band)?vlink::maximumWeight(s):200;
+ if(lastScaleMaximum!=scaleMaximum){lastScaleMaximum=scaleMaximum;lv_scale_set_range(arc,0,scaleMaximum);}
  static int lastTickValue=-1;const int tickValue=s.mode==3?0:iso?(isoEdits[0].known?isoEdits[0].target/10:0):damper?(damperEdit.known?(damperEdit.target+1)*20:0):band?(s.modeValueMs[0]&&now-s.modeValueMs[0]<8000?s.modeValues[0]:0):(edit.known?(page==2?abs(edit.target):edit.target):0);
  if(tickColorChanged||tickValue!=lastTickValue){lastTickValue=tickValue;lv_scale_section_set_range(filledTicks,0,tickValue);lv_obj_invalidate(arc);}
  static int lastTabPage=-1;static uint32_t lastTabAccent=0xffffffff;
@@ -749,9 +822,9 @@ void loop(){
   setBgColor(tabs[i],color(i==page?theme::Selected:theme::Surface),0);
   setTextColor(tabValues[i],color(i==page?accent:theme::Text),0);
   const auto& value=edits[i];
-  if(!live||!value.known||s.mode!=1||(s.twinConnection==2&&!vlink::twinActive(s,now)))snprintf(text,sizeof(text),"--");
+  if(!live||!value.known||!weightUnitKnown||s.mode!=1||(s.twinConnection==2&&!vlink::twinActive(s,now)))snprintf(text,sizeof(text),"--");
   
-  else snprintf(text,sizeof(text),"%.1f",remote::displayWeightKilograms(value.target,vlink::twinActive(s,now)));
+  else if(readoutPounds)snprintf(text,sizeof(text),"%d",value.target*(vlink::twinActive(s,now)?2:1));else snprintf(text,sizeof(text),"%.1f",i==0?remote::displayBaseWeightKilograms(value.target,vlink::twinActive(s,now)):remote::displayWeightKilograms(value.target,vlink::twinActive(s,now)));
   setText(tabValues[i],text);if(tabIconsChanged)lv_obj_invalidate(tabs[i]);
  }
  const bool stopping=s.loaded||s.armed||loadSentMs||(!live&&s.link==vlink::LinkState::Ready);
@@ -815,11 +888,29 @@ void loop(){
    if(autoSpeed)text[0]=0;setText(number,text);
    setFont(number,index==8?&font_inter_20:dialPulseMs&&now-dialPulseMs<500?&font_inter_80:&font_inter_72,0);
    setBgOpacity(number,LV_OPA_TRANSP,0);setTextColor(unit,color(theme::Muted),0);
-   setText(unit,readout.liveWeight?readoutUnit:index==8||autoSpeed?"":index==7||index==9?"m/s":s.weightUnitRaw==1?"kg":s.weightUnitRaw==0?"lbs":"");
+   setText(unit,readout.liveWeight?readoutUnit:index==8||autoSpeed?"":index==7||index==9?(s.lengthUnitRaw==0?"m/s":s.lengthUnitRaw==1?"in/s":""):s.weightUnitRaw==1?"kg":s.weightUnitRaw==0?"lbs":"");
    const char* labels[]={"Speed","Return","Ecc.","Limit"};
    for(int i=0;i<4;++i){const int param=isoIndex(s,i);setText(isoLabels[i],labels[i]);setBgColor(tabs[i],color(i==isoPage?theme::Selected:theme::Surface),0);setTextColor(isoLabels[i],color(i==isoPage?accent:theme::Text),0);setTextColor(tabValues[i],color(i==isoPage?accent:theme::Text),0);isoText(text,sizeof(text),s,param,isoEdits[param-7],now);setText(tabValues[i],text);setFont(tabValues[i],param==8?&font_inter_12:&font_inter_16,0);}
    setText(details,active.timedOut?"Not confirmed - try again":pending()?"Waiting for Voltra":stopping?(isoPage==0?(readout.liveWeight?"Tap weight to unload":"Tap speed to unload"):"Unload to edit settings"):isoPage==0?"Turn to adjust · Tap to load":isoPage==1?"Eccentric return type":isoPage==2?(index==9?"Eccentric speed · 0 = Auto":"Eccentric resistance"):"Maximum eccentric load");
  }else{setBgOpacity(number,LV_OPA_TRANSP,0);setTextColor(unit,color(theme::Muted),0);}
+ // The selected mode remains visible when the firmware has not reported a
+ // recognized motor-ready state. Do not present this as a settings timeout.
+ if(live&&mappedState&&!s.loaded&&!s.armed&&!voltra::fitnessModeReady(s.fitnessMode)&&!pending())
+   setText(details,"Check VOLTRA controls");
+ if(s.motorPending)setText(details,"Checking VOLTRA...");
+ else if(live&&!s.loaded&&!s.armed&&s.motorCompleted&&s.motorFailure!=vlink::MotorFailure::None){
+   const char* reason="Load not confirmed · Try again";
+   switch(s.motorFailure){
+   case vlink::MotorFailure::CableNotZero:reason="Return cable fully · Try again";break;
+   case vlink::MotorFailure::CableUnknown:reason="Cable position unavailable";break;
+   case vlink::MotorFailure::ConfigurationChanged:reason="Settings changed · Try again";break;
+   case vlink::MotorFailure::ConfigurationUnknown:reason="Settings unavailable · Try again";break;
+   case vlink::MotorFailure::EndpointChanged:reason="Connection changed · Try again";break;
+   case vlink::MotorFailure::Revoked:reason="Load cancelled";break;
+   default:break;
+   }
+   setText(details,reason);
+ }
  for(int i=0;i<4;++i){setHidden(isoLabels[i],!iso);if(!iso)setFont(tabValues[i],&font_inter_16,0);}
 
  // Unloaded is an explicit trainer state, not missing telemetry. Keep the

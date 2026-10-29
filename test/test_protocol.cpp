@@ -14,10 +14,15 @@ static bool hexEq(const Frame& f, const char* hex) {
   return true;
 }
 
+static size_t fromHex(const char* hex, uint8_t* out, size_t cap);
+
 static void testFrames() {
  for(int mode:{1,2,4,7})CHECK(supportedMode(mode));
  for(int mode:{0,3,6,8,99})CHECK(!supportedMode(mode));
  CHECK(fitnessModeLoaded(21));CHECK(!fitnessModeUnloaded(21));
+ // Captured ready variant: preserve the raw word but classify 0x0104 as unloaded.
+ CHECK(fitnessModeUnloaded(0x0104));CHECK(!fitnessModeLoaded(0x0104));CHECK(!fitnessModeArmed(0x0104));
+ for(int unknown:{-1,0xffff,0x0204,0x0100,0x0105,0x0126})CHECK(!fitnessModeUnloaded(unknown));
  uint8_t isoStorage[21];Frame iso;
  for(auto entry:{std::pair<int,int>{7,100},{7,500},{7,2000},{8,0},{8,1},{9,0},{9,1000},{10,5},{10,100},{11,200}}){
   CHECK(isokineticFrame(entry.first,entry.second,isoStorage,iso));CHECK(validFrame(iso.data,iso.len));
@@ -32,10 +37,23 @@ static void testFrames() {
  for(int i=0;i<10;++i){CHECK(damperLevelFrame(i,damperBytes,damper));CHECK(validFrame(damper.data,damper.len));CHECK_EQ(damper.len,18u);CHECK_EQ(damper.data[13]|(damper.data[14]<<8),0x5103);CHECK_EQ(damper.data[15],i);}
 
  uint8_t bandStorage[19];Frame band;
- CHECK(!bandMaximumFrame(14,bandStorage,band));CHECK(!bandMaximumFrame(201,bandStorage,band));CHECK(!bandMaximumFrame(106,nullptr,band));
- for(int value=15;value<=200;++value){CHECK(bandMaximumFrame(value,bandStorage,band));CHECK(validFrame(band.data,band.len));CHECK_EQ(band.data[10],0x11);CHECK_EQ(band.data[13]|(band.data[14]<<8),0x5362);CHECK_EQ(band.data[15]|(band.data[16]<<8),value);}
+ CHECK(!bandMaximumFrame(14,bandStorage,band));CHECK(!bandMaximumFrame(251,bandStorage,band));CHECK(!bandMaximumFrame(106,nullptr,band));
+ for(int value=15;value<=250;++value){CHECK(bandMaximumFrame(value,bandStorage,band));CHECK(validFrame(band.data,band.len));CHECK_EQ(band.data[10],0x11);CHECK_EQ(band.data[13]|(band.data[14]<<8),0x5362);CHECK_EQ(band.data[15]|(band.data[16]<<8),value);}
 
   CHECK_EQ(authFrameFallback().len, 41u);
+  {
+    uint8_t storage[19],packet[64];Frame out;
+    CHECK(readMaximumForceFrame(storage,out));CHECK(validFrame(out.data,out.len));
+    CHECK_EQ(out.data[10],0x0f);CHECK_EQ(out.data[13],0x14);CHECK_EQ(out.data[14],0x53);
+    const size_t n=fromHex("551408ce10aa002020000f0001001453e5007daa",packet,sizeof(packet));
+    CHECK_EQ(decode(packet,n).maximumForceLbs,229);
+    for(int maximum:{200,229,230,250}){
+      CHECK(weightFrame(maximum,storage,out));CHECK(validFrame(out.data,out.len));
+      CHECK_EQ(out.data[15],maximum);CHECK_EQ(out.data[13],0x86);
+      CHECK(eccentricFrame(5-maximum,storage,out));CHECK(validFrame(out.data,out.len));
+    }
+    CHECK(!weightFrame(251,storage,out));CHECK(!eccentricFrame(-246,storage,out));
+  }
   CHECK(hexEq(authFrameFallback(), "552904c90110000020004f6950686f6e6500000000000000000000000000000084ab1a5f29200172d8"));
   CHECK_EQ(authFrame().len, 41u);
   CHECK(std::memcmp(authFrame().data, authFrameFallback().data, 11) == 0);      // header + cmd identical
@@ -195,6 +213,10 @@ static void testDecode() {
   // Mode confirmation carrying 893e reports fitnessMode, not training mode.
   n = synth(b, 19, "551304", {{10,0x10},{11,1},{13,0x89},{14,0x3e},{15,4}});
   e = decode(b, n); CHECK(e.type == EventType::Settings); CHECK_EQ(e.fitnessMode, 4); CHECK_EQ(e.mode, -1);
+  // Real VTR-161230 notification from the mode-selection failure, CRC included.
+  n=fromHex("551604fc10aa0c1c2000100200893e0401b04f007153",b,sizeof(b));
+  CHECK(validFrame(b,n));e=decode(b,n);CHECK_EQ(e.fitnessMode,260);CHECK_EQ(e.mode,0);
+  CHECK(fitnessModeUnloaded(e.fitnessMode));CHECK(!fitnessModeLoaded(e.fitnessMode));
   n = synth(b, 18, "551204", {{10,0x10},{11,1},{13,0xb0},{14,0x4f},{15,1}});
   e = decode(b, n); CHECK(e.type == EventType::Settings); CHECK_EQ(e.mode, 1); CHECK_EQ(e.fitnessMode, -1);
   // Unrelated single-register notifications and write ACKs cannot corrupt mode.
@@ -322,15 +344,18 @@ static void testTwinRuntime(){
  b[8]=0x12;CHECK_EQ(decode(b,n-1).repCount,-1);
 }
 
-// Actual Twin samples captured during five reps: a stationary cable, return
-// motion, a range update, and a completed-count update. No device IDs are stored.
+// Actual Twin samples: stationary/return motion and range/count updates, plus
+// Firmware 2.0's three-rep run on 2026-10-28. No device IDs are stored.
 static void testCapturedTwinRuntime(){
  struct Fixture{const char* hex;int force,peer,velocity,peerVelocity,sets,reps;};
  for(const auto& fixture:{
    Fixture{"551b047510aa1e9e1000b40600020000003c00080002000000456f",6,8,0,0,-1,-1},
    Fixture{"551b047510aaa6b11000b46700640091fe67006b00630085fe657c",103,107,-367,-379,-1,-1},
    Fixture{"551f044e10aa72a91100b44200bd0064fe00000e013c003f00c200f7fec097",66,63,-412,-265,-1,-1},
-   Fixture{"551f044e10aa0ea91200b43d00f20085fe030001003c003f00ed0032fe55c3",61,63,-379,-462,3,1}}){
+   Fixture{"551f044e10aa0ea91200b43d00f20085fe030001003c003f00ed0032fe55c3",61,63,-379,-462,3,1},
+   Fixture{"551f044e10aa52e01200b43600a300fdfd0200010032003600980086fe6687",54,54,-515,-378,2,1},
+   Fixture{"551f044e10aa22e81200b44700f400c1fd0200020046004c00db00aafd11af",71,76,-575,-598,2,2},
+   Fixture{"551f044e10aa2aef1200b44b00ed007afd0200030048005100cd004dfd0522",75,81,-646,-691,2,3}}){
    uint8_t bytes[40]{};const size_t size=std::strlen(fixture.hex)/2;
    for(size_t i=0;i<size;++i){unsigned value;std::sscanf(fixture.hex+2*i,"%2x",&value);bytes[i]=value;}
    CHECK(validFrame(bytes,size));const auto e=decode(bytes,size);

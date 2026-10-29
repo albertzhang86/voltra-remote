@@ -7,3 +7,5 @@ jobs:
       - uses: actions/checkout@v4
       - name: Protocol, control, encoder and audio tests
         run: bash tools/test.sh
+      - name: Mode selection and critical touch flows (actual LVGL)
+        run: python3 tools/preview.py

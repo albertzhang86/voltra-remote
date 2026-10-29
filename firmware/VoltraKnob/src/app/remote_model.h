@@ -15,10 +15,17 @@ inline double displayKilograms(int pounds){return displayHalfKilograms(pounds)*0
 // Twin screen adds the two device-rounded weights: 179 lb -> 81.5 kg each -> 163 kg.
 // Do not convert doubled raw pounds (that would incorrectly show 162.5 kg).
 inline double displayWeightKilograms(int pounds,bool twin){return displayKilograms(pounds)*(twin?2:1);}
+// Weight Training's minimum is 5 lb / 2 kg on the trainer (4 kg in Twin).
+// This endpoint is distinct from the regular half-kg grid and from modifiers.
+inline double displayBaseWeightKilograms(int pounds,bool twin){return (pounds==5?2.0:displayKilograms(pounds))*(twin?2:1);}
 inline int kgStep(int pounds,int direction,int minimum,int maximum){
   const int halfKg=displayHalfKilograms(pounds)+direction;
   const int next=halfKg<0?-((-halfKg*11+5)/10):(halfKg*11+5)/10;
   return std::max(minimum,std::min(maximum,next));
+}
+inline int baseWeightKgStep(int pounds,int direction,int minimum,int maximum){
+  if(pounds==5&&direction>0)return std::min(maximum,6);
+  return kgStep(pounds,direction,minimum,maximum);
 }
 
 inline int damperFactor(int index){constexpr int factors[]={5,8,11,14,17,21,30,33,41,50};return index>=0&&index<10?factors[index]:-1;}
@@ -33,9 +40,9 @@ struct Editor {
    if(!known||!pending){target=value;known=true;}
    if(pending&&sent&&value==target){pending=false;sent=false;timedOut=false;}
  }
- void turn(int direction,bool allowed,bool percent,uint32_t now,int low,int high){
+ void turn(int direction,bool allowed,bool percent,uint32_t now,int low,int high,bool baseWeight=false,bool pounds=false){
    if(!allowed||!known||sent)return;
-   const int value=percent?std::max(low,std::min(high,target+direction*5)):kgStep(target,direction,low,high);
+   const int value=pounds?std::max(low,std::min(high,target+direction)):percent?std::max(low,std::min(high,target+direction*5)):baseWeight?baseWeightKgStep(target,direction,low,high):kgStep(target,direction,low,high);
    if(value==target)return;
    target=value;pending=target!=confirmed;changedMs=now;timedOut=false;
  }

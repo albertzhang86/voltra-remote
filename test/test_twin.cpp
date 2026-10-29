@@ -44,6 +44,20 @@ int main(){
  s.twinPending=true;CHECK(!vlink::canChangeTwin(s,200,true));s.twinPending=false;
  CHECK(!vlink::canChangeTwin(s,4000,true));s.endpoint.status=0x12;strcpy(s.endpoint.peer,s.trainers[1].address);
  CHECK(vlink::canChangeTwin(s,200,false));CHECK(!vlink::canChangeTwin(s,200,true));
+ // Local and TV admission permit one automatic unload; native topology admission
+ // stays strict, including for unknown fitness values or conflicting work.
+ for(int mode:{1,2,4,7})for(int fitness:{5,21,0x26,0x27})for(bool paired:{false,true}){
+   auto active=s;active.mode=mode;active.fitnessMode=fitness;
+   active.loaded=voltra::fitnessModeLoaded(fitness);active.armed=voltra::fitnessModeArmed(fitness);
+   active.endpoint.status=paired?0x12:0;
+   strcpy(active.endpoint.peer,paired?active.trainers[1].address:"00:00:00:00:00:00");
+   CHECK(vlink::canRequestTwin(active,200,!paired));CHECK(!vlink::canChangeTwin(active,200,!paired));
+   active.motorPending=true;CHECK(!vlink::canRequestTwin(active,200,!paired));active.motorPending=false;
+   active.twinPending=true;CHECK(!vlink::canRequestTwin(active,200,!paired));active.twinPending=false;
+   active.cableActive=true;CHECK(!vlink::canRequestTwin(active,200,!paired));active.cableActive=false;
+   CHECK(!vlink::canRequestTwin(active,4000,!paired));
+   active.fitnessMode=0x0205;CHECK(!vlink::canRequestTwin(active,200,!paired));
+ }
  // Discovery pauses during TV pairing/connection. Saved candidates remain
  // selectable, but never authorize settings without a live verified session.
  s.endpoint.status=0;strcpy(s.endpoint.peer,"00:00:00:00:00:00");
@@ -53,6 +67,32 @@ int main(){
  CHECK(vlink::trainerAvailable(s,1,20200));CHECK(!vlink::canChangeTwin(s,20200,true));
  s.trainers[1].seen=false;CHECK(vlink::trainerAvailable(s,1,20200));
  CHECK(!vlink::canChangeTwin(s,20200,true)); // Remembered identity is not proximity evidence.
+ // Reproduce the physical TV-connected knob: the scan lease has expired, but
+ // the exact saved peer can be checked without restarting scanning. This is
+ // request admission only, never evidence that the peer is nearby or unloaded.
+ for(int selected:{0,1})for(int mode:{0,1,2,4,7})for(int fitness:{0,4,0x0104,1,5,21,0x26,0x27}){
+   auto saved=s;
+   if(selected==1){auto first=saved.trainers[0];saved.trainers[0]=saved.trainers[1];saved.trainers[1]=first;}
+   saved.selected=selected;saved.mode=mode;saved.fitnessMode=fitness;
+   saved.loaded=fitnessModeLoaded(fitness);saved.armed=fitnessModeArmed(fitness);
+   CHECK(vlink::twinRequestPeer(saved,20200)==&saved.trainers[1-selected]);
+   CHECK(vlink::canRequestTwin(saved,20200,true)==(mode!=0||fitnessModeUnloaded(fitness)));
+   CHECK(!vlink::canChangeTwin(saved,20200,true));
+   CHECK(!vlink::trainerNearby(saved,1-selected,20200));
+   saved.discoveryPausedForTv=false;CHECK(!vlink::canRequestTwin(saved,20200,true));saved.discoveryPausedForTv=true;
+   saved.fitnessMode=0x0204;CHECK(!vlink::canRequestTwin(saved,20200,true));saved.fitnessMode=fitness;
+   saved.twinPending=true;CHECK(!vlink::canRequestTwin(saved,20200,true));saved.twinPending=false;
+   saved.motorPending=true;CHECK(!vlink::canRequestTwin(saved,20200,true));saved.motorPending=false;
+   saved.cableActive=true;CHECK(!vlink::canRequestTwin(saved,20200,true));saved.cableActive=false;
+   saved.endpointMs=0;CHECK(!vlink::canRequestTwin(saved,20200,true));saved.endpointMs=20100;
+   CHECK(!vlink::canRequestTwin(saved,25000,true));
+   saved.nearby[0]=saved.trainers[1-selected];saved.nearby[0].seen=true;saved.nearby[0].lastSeenMs=20100;
+   strcpy(saved.nearby[0].address,"02:00:00:00:00:03");
+   CHECK(!vlink::canRequestTwin(saved,20200,true));saved.nearby[0]={};
+   strcpy(saved.trainers[1-selected].address,saved.trainers[selected].address);
+   CHECK(!vlink::canRequestTwin(saved,20200,true));saved.trainers[1-selected]={};
+   CHECK(!vlink::canRequestTwin(saved,20200,true));
+ }
  s.trainers[1].seen=true;s.trainers[1].lastSeenMs=20100;
  CHECK(vlink::canChangeTwin(s,20200,true));
  strcpy(s.trainers[1].address,s.trainers[0].address);CHECK(!vlink::canChangeTwin(s,20200,true));
@@ -70,8 +110,41 @@ int main(){
  s.discoveryPausedForTv=true;s.trainers[1]={};s.nearby[0]={};
  vlink::TvTwinOffer offer;offer.epoch=7;offer.session=s.session;offer.deadline=21500;offer.ready=true;
  strcpy(offer.peer,"02:00:00:00:00:02");
+ CHECK(vlink::tvOwnsTwinPeer(offer,7,s.session,offer.peer));
+ offer.ready=false;CHECK(vlink::tvOwnsTwinPeer(offer,7,s.session,offer.peer));
+ CHECK(!vlink::tvTwinOfferMatches(offer,7,s.session,offer.peer));offer.ready=true;
+ CHECK(!vlink::tvOwnsTwinPeer(offer,8,s.session,offer.peer));
+ CHECK(!vlink::tvOwnsTwinPeer(offer,7,s.session+1,offer.peer));
+ CHECK(!vlink::tvOwnsTwinPeer(offer,7,s.session,"02:00:00:00:00:03"));
  CHECK(!vlink::canChangeTwin(s,20200,true));
  CHECK(vlink::canHandoffTwin(s,offer,7,offer.peer,20200));
+ // TV requests use preparation admission even when the controller is loaded.
+ // A fresh exact offer substitutes for the peer advertisement, never for
+ // native unloaded confirmation or the expected identity/session/slot.
+ for(int mode:{1,2,4,7})for(int fitness:{4,0x0104,5,21,0x26,0x27}){
+   auto active=s;active.mode=mode;active.fitnessMode=fitness;
+   active.loaded=fitnessModeLoaded(fitness);active.armed=fitnessModeArmed(fitness);
+   CHECK(vlink::canRequestHandoffTwin(active,offer,7,offer.peer,20200));
+   CHECK(vlink::canHandoffTwin(active,offer,7,offer.peer,20200)==fitnessModeUnloaded(fitness));
+   CHECK(!vlink::canRequestHandoffTwin(active,offer,8,offer.peer,20200));
+   CHECK(!vlink::canRequestHandoffTwin(active,offer,7,"02:00:00:00:00:03",20200));
+   CHECK(!vlink::canRequestHandoffTwin(active,offer,7,offer.peer,21500));
+   ++active.session;CHECK(!vlink::canRequestHandoffTwin(active,offer,7,offer.peer,20200));--active.session;
+   strcpy(active.trainers[1].address,"02:00:00:00:00:03");
+   CHECK(!vlink::canRequestHandoffTwin(active,offer,7,offer.peer,20200));active.trainers[1]={};
+   active.twinPending=true;CHECK(!vlink::canRequestHandoffTwin(active,offer,7,offer.peer,20200));active.twinPending=false;
+   active.motorPending=true;CHECK(!vlink::canRequestHandoffTwin(active,offer,7,offer.peer,20200));active.motorPending=false;
+   active.cableActive=true;CHECK(!vlink::canRequestHandoffTwin(active,offer,7,offer.peer,20200));active.cableActive=false;
+   active.fitnessMode=0x0105;CHECK(!vlink::canRequestHandoffTwin(active,offer,7,offer.peer,20200));
+ }
+ // A TV Create without an explicit peer can prepare the one unambiguous nearby
+ // trainer even when it is not saved. Unknown or competing peers stay blocked.
+ auto nearbyRequest=s;nearbyRequest.loaded=true;nearbyRequest.fitnessMode=5;
+ strcpy(nearbyRequest.nearby[0].address,offer.peer);nearbyRequest.nearby[0].seen=true;nearbyRequest.nearby[0].lastSeenMs=20100;
+ CHECK(vlink::canRequestTwin(nearbyRequest,20200,true));CHECK(!vlink::canChangeTwin(nearbyRequest,20200,true));
+ nearbyRequest.nearby[1]=nearbyRequest.nearby[0];strcpy(nearbyRequest.nearby[1].address,"02:00:00:00:00:03");
+ CHECK(!vlink::canRequestTwin(nearbyRequest,20200,true));nearbyRequest.nearby[1]={};
+ nearbyRequest.nearby[0].lastSeenMs=100;CHECK(!vlink::canRequestTwin(nearbyRequest,20200,true));
  // With A+B saved, a TV-owned C cannot silently replace B after pairing.
  // Exercise both controller slots, a free slot, and case-insensitive peer reuse.
  for(int controllerSlot:{0,1}){
@@ -137,6 +210,16 @@ int main(){
  peer=controller;strcpy(peer.endpoint.local,"02:00:00:00:00:02");
  const char* controllerAddress="02:00:00:00:00:01";
  const char* peerAddress="02:00:00:00:00:02";
+ for(int mode:{0,1,2,4,7,3,-1})for(int fitness:{0,1,4,5,21,0x26,0x27,0x0104,0x0204,0x0105,-1}){
+   auto candidate=peer;candidate.mode=mode;candidate.fitness=fitness;
+   const bool ready=(mode==0||supportedMode(mode))&&
+     (fitnessModeUnloaded(fitness)||(supportedMode(mode)&&(fitnessModeLoaded(fitness)||fitnessModeArmed(fitness))));
+   CHECK(vlink::twinParticipantCanPrepare(candidate,peerAddress,21200)==ready);
+   CHECK(!vlink::twinParticipantCanPrepare(candidate,controllerAddress,21200));
+   CHECK(!vlink::twinParticipantCanPrepare(candidate,peerAddress,25000));
+   candidate.endpoint.status=0x12;strcpy(candidate.endpoint.peer,controllerAddress);
+   CHECK(!vlink::twinParticipantCanPrepare(candidate,peerAddress,21200));
+ }
  for(int mode:{0,1,2,4,7}){
    controller.mode=peer.mode=mode;
    CHECK(vlink::twinParticipantIndependent(controller,controllerAddress,21200));
@@ -155,6 +238,36 @@ int main(){
  peer.mode=6;CHECK(!vlink::twinParticipantIndependent(peer,peerAddress,21200));peer.mode=0;
  CHECK(vlink::twinParticipantIdle(peer,peerAddress,21200));
 
+ // Exercise the production STOP/readback sequence, with asynchronous success,
+ // rejection, stale status, changed identity/mode, cancellation and timeout.
+ for(bool paired:{false,true})for(int mode:{1,2,4,7})for(int initialFitness:{5,21,0x26,0x27})for(int failure=0;failure<10;++failure){
+   auto live=controller;live.mode=mode;live.fitness=initialFitness;live.endpoint.status=paired?0x12:0;
+   strcpy(live.endpoint.peer,paired?peerAddress:"00:00:00:00:00:00");
+   uint32_t clock=21200;int stops=0,waits=0;bool authorized=failure!=1;
+   const auto result=vlink::unloadTwinParticipant(controllerAddress,[&]{return live;},[&]{return authorized;},
+     [&]{++stops;return failure!=2;},[&](uint32_t timeout,const auto& confirmed){
+       ++waits;CHECK_EQ(timeout,2500u);CHECK(!confirmed()); // ACK/old loaded status cannot advance.
+       clock+=100;live.endpointAt=clock;live.fitness=initialFitness==5?4:0x0104;
+       if(failure!=3)live.statusAt=clock;
+       if(failure==4)live.mode=mode==1?2:1;
+       if(failure==5)strcpy(live.endpoint.local,"02:00:00:00:00:03");
+       if(failure==6)live.endpoint.status=paired?0:0x12;
+       if(failure==7)authorized=false;
+       if(failure==8)live.fitness=5;
+       if(failure==9)live.endpointAt=0;
+       return confirmed();
+     },[&]{return clock;});
+   CHECK_EQ(result,failure==0?vlink::TwinUnloadResult::Ready:failure==1||failure==7?vlink::TwinUnloadResult::Cancelled:
+      failure==2?vlink::TwinUnloadResult::WriteFailed:vlink::TwinUnloadResult::NotConfirmed);
+   CHECK_EQ(stops,failure==1?0:1);CHECK_EQ(waits,failure==1||failure==2?0:1);
+ }
+ for(int fitness:{0,4,0x0104,-1,0x0204,0x0105}){
+   auto live=controller;live.mode=1;live.fitness=fitness;int stops=0,waits=0;
+   const auto result=vlink::unloadTwinParticipant(controllerAddress,[&]{return live;},[]{return true;},
+      [&]{++stops;return true;},[&](uint32_t,const auto&){++waits;return false;},[]{return 21200u;});
+   CHECK_EQ(result,voltra::fitnessModeUnloaded(fitness)?vlink::TwinUnloadResult::Ready:vlink::TwinUnloadResult::State);
+   CHECK_EQ(stops,0);CHECK_EQ(waits,0);
+ }
  // A request acknowledgment alone cannot prove native pairing. Require the
  // controller's new, fresh endpoint report identifying the requested peer.
  controller.mode=0;controller.endpoint.status=0x12;

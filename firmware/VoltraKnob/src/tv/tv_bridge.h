@@ -1,5 +1,7 @@
 #pragma once
+#include "../app/setup_activity.h"
 namespace tvbridge {
+remote::SetupActivity setupActivity();
 struct MixedTwinOffer {
  bool available=false,pending=false,owned=false;
  char peerAddress[18]{},peerName[32]{},message[64]{};

@@ -11,6 +11,14 @@ bool readModeParameterFrame(int index,uint8_t* storage,Frame& out){
  uint16_t c16=0x3692;for(int i=0;i<15;++i){c16^=storage[i];for(int b=0;b<8;++b)c16=(c16>>1)^((c16&1)?0x8408:0);}storage[15]=c16&255;storage[16]=c16>>8;
  out={storage,17};return true;
 }
+bool readMaximumForceFrame(uint8_t* storage,Frame& out){
+ if(!storage)return false;
+ const uint8_t bytes[]={0x55,17,4,0,0xaa,0x10,0,0x20,0x20,0,0x0f,1,0,0x14,0x53,0,0};
+ for(int i=0;i<17;++i)storage[i]=bytes[i];
+ uint8_t c8=0x77;for(int i=0;i<3;++i){c8^=storage[i];for(int b=0;b<8;++b)c8=(c8>>1)^((c8&1)?0x8c:0);}storage[3]=c8;
+ uint16_t crc=0x3692;for(int i=0;i<15;++i){crc^=storage[i];for(int b=0;b<8;++b)crc=(crc>>1)^((crc&1)?0x8408:0);}
+ storage[15]=crc&255;storage[16]=crc>>8;out={storage,17};return true;
+}
 namespace {
 bool parameterWrite(uint16_t id,int value,int width,uint8_t* storage,Frame& out){
  if(!storage)return false;const int size=17+width;
@@ -34,13 +42,14 @@ bool damperLevelFrame(int index,uint8_t* storage,Frame& out){
  uint16_t crc=0x3692;for(int i=0;i<16;++i){crc^=storage[i];for(int b=0;b<8;++b)crc=(crc>>1)^((crc&1)?0x8408:0);}
  storage[16]=crc&255;storage[17]=crc>>8;out={storage,18};return true;
 }
+bool weightFrame(int pounds,uint8_t* storage,Frame& out){
+ return pounds>=5&&pounds<=250&&parameterWrite(0x3e86,pounds,2,storage,out);
+}
+bool eccentricFrame(int pounds,uint8_t* storage,Frame& out){
+ return pounds>=-245&&pounds<=245&&parameterWrite(0x3e88,pounds,2,storage,out);
+}
 bool bandMaximumFrame(int pounds,uint8_t* storage,Frame& out){
- if(!storage||pounds<15||pounds>200)return false;
- // Same single-register write envelope as weight; dedicated Band register.
- for(int i=0;i<19;++i)storage[i]=frames::WEIGHT[pounds-WEIGHT_MIN][i];
- storage[13]=0x62;storage[14]=0x53;
- uint16_t crc=0x3692;for(int i=0;i<17;++i){crc^=storage[i];for(int b=0;b<8;++b)crc=(crc>>1)^((crc&1)?0x8408:0);}
- storage[17]=crc&255;storage[18]=crc>>8;out={storage,19};return true;
+ return pounds>=15&&pounds<=250&&parameterWrite(0x5362,pounds,2,storage,out);
 }
 Frame authFrame() { return {frames::AUTH_KNOB, sizeof(frames::AUTH_KNOB)}; }
 Frame authFrameFallback() { return {frames::AUTH_IPHONE, sizeof(frames::AUTH_IPHONE)}; }
@@ -73,6 +82,13 @@ Frame initFrame(size_t i) {
   return {frames::INIT1, sizeof(frames::INIT1)};
 }
 Frame setupFrame() { return {frames::SETUP, sizeof(frames::SETUP)}; }
+bool motorFrame(int reportedState,bool load,uint8_t* storage,Frame& out){
+ const int value=motorCommandValue(reportedState,load);
+ if(value<0)return false;
+ if(value==5){out=goFrame();return true;}
+ if(value==4){out=stopFrame();return true;}
+ return parameterWrite(0x3e89,value,2,storage,out);
+}
 Frame goFrame() { return {frames::GO, sizeof(frames::GO)}; }
 Frame stopFrame() { return {frames::STOP, sizeof(frames::STOP)}; }
 Frame modeWeightTrainingFrame() { return {frames::MODE_WEIGHT_TRAINING, sizeof(frames::MODE_WEIGHT_TRAINING)}; }
@@ -126,6 +142,11 @@ inline bool vendor(const uint8_t* d, size_t n, uint8_t a, uint8_t b) {
 }
 // Widths for the cmd 0x0f bulk response (SDK CMD_0F_KNOWN_PARAM_WIDTHS). 0 = unknown, stop parsing.
 inline size_t cmd0fWidth(uint8_t hi, uint8_t lo) {
+  // Width-only entries from the SDK catalogue, confirmed in Firmware 2.0's
+  // settings cascade. Semantics are unknown; skip them without losing mode.
+  if((lo==0x51&&(hi==0x02||hi==0x24))||(lo==0x4e&&hi==0xe1))return 1;
+  if(lo==0x50&&(hi==0x6e||hi==0x6f))return 4;
+  if(lo==0x53&&hi==0x14)return 2;
   if(lo==0x51&&hi==0x6c)return 1; // COWORKER_CONN_ST
   if(lo==0x54&&hi==0x38)return 1; // LAST_COWORKER_ROLE (saved, not proof of active Twin)
   if(lo==0x53&&(hi==0xb3||hi==0xb4||hi==0xb5))return 2;
@@ -143,7 +164,10 @@ inline size_t cmd0fWidth(uint8_t hi, uint8_t lo) {
   return 0;
 }
 inline void applyParam(Event& e, uint8_t hi, uint8_t lo, int value) {
-  if(lo==0x51&&hi==0x6c)e.twinConnection=value;
+  if(lo==0x53&&hi==0x14)e.maximumForceLbs=value;
+  else if(lo==0x50&&hi==0x6e)e.weightUnitRaw=value>=0?value:2;
+  else if(lo==0x50&&hi==0x6f)e.lengthUnitRaw=value>=0?value:2;
+  else if(lo==0x51&&hi==0x6c)e.twinConnection=value;
   else if(lo==0x54&&hi==0x38)e.twinLastRole=value;
   else if(lo==0x53&&hi==0xb3)e.twinMainForce=value;
   else if(lo==0x53&&hi==0xb4)e.twinSubForce=value;
@@ -200,13 +224,18 @@ Event decode(const uint8_t* d, size_t n) {
       return e;
     }
   }
+  // Verified 0x5314 current allowed-force ceiling, uint16 lb (229 = 104 kg).
+  if(n==20 && (d[2]==0x08||d[2]==0x09) && d[10]==0x0f &&
+     d[11]==0 && d[12]==1 && d[13]==0 && d[14]==0x14 && d[15]==0x53){
+    e.type=EventType::Settings;e.maximumForceLbs=u16le(d,16);return e;
+  }
   // Isolated unit query: parameter 0x506e, documented as uint32 in vendor catalog.
   if(n >= 19 && d[0]==0x55 && (d[2]==0x08||d[2]==0x09) && d[10]==0x0f
      && d[11]==0 && d[12]==1 && d[13]==0 && (d[14]==0x6e||d[14]==0x6f) && d[15]==0x50) {
     const size_t width=n-18;
     if(width==1 || width==2 || width==4){
       uint32_t raw=0;for(size_t i=0;i<width;++i)raw|=static_cast<uint32_t>(d[16+i])<<(8*i);
-      if(raw<=0x7fffffff){e.type=EventType::Settings;if(d[14]==0x6e)e.weightUnitRaw=static_cast<int>(raw);else e.lengthUnitRaw=static_cast<int>(raw);}
+      {e.type=EventType::Settings;const int unit=raw<=1?static_cast<int>(raw):2;if(d[14]==0x6e)e.weightUnitRaw=unit;else e.lengthUnitRaw=unit;}
     }
     return e;
   }
@@ -298,7 +327,7 @@ Event decode(const uint8_t* d, size_t n) {
       off += 2;
       const size_t width = cmd0fWidth(hi,lo);
       if (!width || off + width > n-2) break;
-      const int value = width == 2 ? u16le(d, off) : d[off];
+      const int value = width == 4 ? int(uint32_t(u16le(d,off))|(uint32_t(u16le(d,off+2))<<16)) : width == 2 ? u16le(d, off) : d[off];
       off += width;
       applyParam(e, hi, lo, value);
       if(hi==0x6a&&lo==0x50)e.cableSavedNotification=true;
@@ -315,7 +344,7 @@ Event decode(const uint8_t* d, size_t n) {
       off += 2;
       const size_t width = cmd0fWidth(hi, lo);
       if (width == 0 || off + width > n-2) break;
-      const int value = width == 2 ? u16le(d, off) : d[off];
+      const int value = width == 4 ? int(uint32_t(u16le(d,off))|(uint32_t(u16le(d,off+2))<<16)) : width == 2 ? u16le(d, off) : d[off];
       off += width;
       applyParam(e, hi, lo, value);
     }

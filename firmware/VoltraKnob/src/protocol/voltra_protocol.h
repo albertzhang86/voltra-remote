@@ -23,6 +23,8 @@ Frame readRuntimeWireWeightFrame();
 Frame readTelemetryRateFrame();
 Frame readTelemetrySubscriptionFrame();
 Frame readWeightUnitFrame();
+// Read the device-enforced ceiling; never write it or enable Overdrive.
+bool readMaximumForceFrame(uint8_t* storage,Frame& out);
 Frame readSettingsFrame();
 // Caller supplies 19 bytes; Band maximum is uint16 lb, range 15..200.
 // Caller supplies 21 bytes. Captured Isokinetic parameter widths are 4/1/2 bytes.
@@ -39,10 +41,14 @@ Frame initFrame(size_t i);
 Frame setupFrame();
 Frame goFrame();
 Frame stopFrame();
+// Writes a known motor encoding without inventing flags. Caller supplies 19 bytes.
+bool motorFrame(int reportedState,bool load,uint8_t* storage,Frame& out);
 Frame modeWeightTrainingFrame();
 Frame modeIdleFrame();
 bool modeFrame(int mode,Frame& out);
 bool weightFrame(int lbs, Frame& out);
+bool weightFrame(int lbs, uint8_t* storage, Frame& out);
+bool eccentricFrame(int lbs, uint8_t* storage, Frame& out);
 bool chainsFrame(int lbs, Frame& out);
 bool inverseChainsFrame(int lbs, Frame& out);
 bool eccentricFrame(int percent, Frame& out);
@@ -55,6 +61,7 @@ struct Event {
   EventType type = EventType::Unknown;
   int weightLbs = -1;   // Settings
   int weightUnitRaw = -1;
+  int maximumForceLbs = -1;
   int telemetryRateHz = -1;
   bool hasTelemetrySubscription = false;
   uint32_t telemetrySubscription = 0;
@@ -66,7 +73,7 @@ struct Event {
   int inverseChainsEnabled = -1;
   int eccentricLbs = -1000;
   int mode = -1;        // Settings, ModeConfirmed (0 idle, 1 weight training, ...)
-  int fitnessMode = -1; // Settings, ModeConfirmed: 893e register; 5 or 0x27 = motor engaged, 4 = ready, 0x26 = auto-load armed
+  int fitnessMode = -1; // Raw 0x3e89 motor report; interpreted by the helpers below, separately from mode.
   int guidedCountdownMs = -1; // Settings: 53c8 register while auto-load is armed
   int guidedSafety = -1;      // Settings: 538d register (0 = ok)
   int guidedState = -1;       // Settings: 53c7 register
@@ -92,10 +99,24 @@ struct Event {
 };
 
 constexpr int FITNESS_MODE_AUTOLOAD_ARMED = 0x26;
+// Register 0x3e89 is independent of training mode. Native load/unload on
+// VTR-161230 Firmware 2.0 reports 1/0 (2026-10-28); legacy reports 5/4.
+// Decode only observed words, never mask arbitrary flags into load permission.
+// An unloaded word alone is NOT readiness: the link checks mode, endpoint,
+// settings, and fresh cable-zero readbacks before any motor write.
+constexpr bool fitnessModeReady(int fm) { return fm == 0 || fm == 4 || fm == 0x0104; }
 // 0x27 (direct-load active) is reported right after arming, before the pull, so it counts as armed.
-constexpr bool fitnessModeLoaded(int fm) { return fm == 5 || fm == 21; }
+constexpr bool fitnessModeLoaded(int fm) { return fm == 1 || fm == 5 || fm == 21; }
 constexpr bool fitnessModeArmed(int fm) { return fm == FITNESS_MODE_AUTOLOAD_ARMED || fm == 0x27; }
-constexpr bool fitnessModeUnloaded(int fm) { return fm == 4 || fm == 0; }
+constexpr bool fitnessModeUnloaded(int fm) { return fitnessModeReady(fm); }
+
+// Keep the observed 0/1 family separate from the legacy 4/5 command family.
+// Unknown states must not be normalized by clearing high bits.
+constexpr int motorCommandValue(int fm,bool load){
+ if(load)return fitnessModeReady(fm)?(fm==0?1:5):-1;
+ if(fm==0||fm==1)return 0;
+ return fitnessModeReady(fm)||fitnessModeLoaded(fm)||fitnessModeArmed(fm)?4:-1;
+}
 
 // Decode one BLE notification. Never throws; unknown or short input yields EventType::Unknown.
 Event decode(const uint8_t* d, size_t n);

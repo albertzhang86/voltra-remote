@@ -1,10 +1,39 @@
 #include "tv/bridge_protocol.h"
 #include "tv/connection_policy.h"
+#include "tv/setup_activity.h"
 #include <cassert>
 #include <iostream>
 #include <cstring>
 int main(){
  using namespace tvbridge;
+ {
+  using A=remote::SetupActivity;
+  SetupActivityLease lease;
+  Command activity;activity.type=11;activity.epoch=7;activity.session=3;
+  activity.deadline=2500;activity.field=2;
+  assert(lease.accept(activity,7,3,1000));assert(lease.current(1000)==A::CreateTwin);
+  assert(!lease.accept(activity,7,3,1100)); // Replay cannot extend the display.
+  assert(!lease.accept(activity,8,3,1100));assert(!lease.accept(activity,7,4,1100));
+  assert(lease.current(8499)==A::CreateTwin);assert(lease.current(8500)==A::None);
+  activity.deadline=10000;activity.session=4;activity.field=3;
+  assert(lease.accept(activity,7,4,8500));assert(lease.current(8500)==A::ExitTwin);
+  activity.deadline=10001;activity.field=0;
+  assert(lease.accept(activity,7,4,8501));assert(lease.current(8501)==A::None);
+  activity.field=2;activity.deadline=10000;
+  assert(!lease.accept(activity,7,4,8501));assert(lease.current(8501)==A::None);
+  activity.deadline=11000;activity.field=6;assert(!lease.accept(activity,7,4,9500));
+  activity.field=1;activity.id=1;assert(!lease.accept(activity,7,4,9500));
+  activity.id=0;activity.value=1;assert(!lease.accept(activity,7,4,9500));
+  activity.value=0;assert(!lease.accept(activity,7,4,11000));
+  assert(!lease.accept(activity,7,4,8999));
+  activity.epoch=8;activity.deadline=500;
+  assert(lease.accept(activity,8,4,UINT32_MAX-999));assert(lease.current(0)==A::Connecting);
+  assert(lease.current(6500)==A::None);
+  uint8_t packet[24]={MAGIC,VERSION,11,0};put32(packet+4,8);put32(packet+8,4);
+  put32(packet+12,500);put16(packet+18,3);Command decoded;
+  assert(decode(packet,sizeof(packet),decoded));assert(decoded.type==11&&decoded.field==3);
+  assert(!validRequest(decoded,8,4,0,0)); // No control command ID.
+ }
  // A saved bond enables identity-resolution handshakes with pairing closed.
  assert(allowConnection(true,false,true,false));
  assert(!allowConnection(true,false,false,false));
@@ -22,9 +51,9 @@ int main(){
  assert(!allowAuthentication(true,true,false,true,false,false));
  assert(!windowOpen(0,1));assert(windowOpen(100,99));assert(!windowOpen(100,100));
  assert(windowOpen(100,UINT32_MAX-10));
- assert(weightUnitFlags(1,0)==8);assert(weightUnitFlags(1,-1)==8);
- assert(weightUnitFlags(2,0)==4);assert(weightUnitFlags(2,1)==8);
- assert(weightUnitFlags(7,-1)==0);assert(weightUnitFlags(7,2)==0);
+ assert(weightUnitFlags(0)==4);assert(weightUnitFlags(-1)==0);
+ assert(weightUnitFlags(0)==4);assert(weightUnitFlags(1)==8);
+ assert(weightUnitFlags(-1)==0);assert(weightUnitFlags(2)==0);
  assert(encodedRepCount(-1)==65535);assert(encodedRepCount(0)==0);
  assert(encodedRepCount(1)==1);assert(encodedRepCount(65534)==65534);
  assert(encodedRepCount(65535)==65535);assert(encodedRepCount(65536)==65535);
@@ -48,9 +77,51 @@ int main(){
  assert(!validRequest(c,124,7,0,1000));assert(!validRequest(c,123,8,0,1000));
  assert(!validRequest(c,123,7,1,1000));assert(!validRequest(c,123,7,0,3000));
  assert(!validRequest(c,123,7,0,999));
- assert(!decode(bytes,23,c));bytes[2]=10;assert(!decode(bytes,24,c));bytes[2]=3;
+ // Reopening the app can retain its physical encrypted BLE connection. Its
+ // explicit CCCD 0 -> 1 renews the control epoch without weakening replay checks.
+ assert(subscriptionChange(true,true,true,0)==SubscriptionChange::Revoke);
+ assert(!logicalSessionReady(true,false,0));
+ assert(!validRequest(c,0,7,0,1000)); // Notifications off never authorizes writes.
+ assert(subscriptionChange(true,true,false,1)==SubscriptionChange::Renew);
+ const uint32_t newEpoch=renewedEpoch(123,123);assert(newEpoch!=0&&newEpoch!=123);
+ assert(logicalSessionReady(true,true,newEpoch));
+ assert(!validRequest(c,newEpoch,7,0,1000)); // Old queued command is revoked.
+ Command renewed=c;renewed.epoch=newEpoch;
+ assert(validRequest(renewed,newEpoch,7,0,1000)); // New app starts with command 1.
+ assert(!validRequest(renewed,newEpoch,7,1,1000)); // Same-epoch replay still rejected.
+ assert(!std::strcmp(requestRejection(renewed,newEpoch,7,1,1000),"replay"));
+ assert(!std::strcmp(requestRejection(c,newEpoch,7,0,1000),"epoch"));
+ assert(!std::strcmp(requestRejection(c,123,7,0,3000),"expired"));
+ assert(!std::strcmp(requestRejection(c,123,7,0,999),"future-deadline"));
+ assert(!std::strcmp(requestRejection(c,123,8,0,1000),"trainer-session"));
+ assert(subscriptionChange(true,true,true,1)==SubscriptionChange::Ignore); // Duplicate enable.
+ assert(subscriptionChange(true,true,true,3)==SubscriptionChange::Ignore);
+ assert(subscriptionChange(true,true,true,2)==SubscriptionChange::Revoke); // Notification bit off.
+ for(uint16_t setting:{0,1,2,3}){
+   assert(subscriptionChange(false,true,true,setting)==SubscriptionChange::Ignore);
+   assert(subscriptionChange(true,false,true,setting)==SubscriptionChange::Ignore);
+   assert(subscriptionChange(true,false,false,setting)==SubscriptionChange::Ignore);
+ }
+ assert(subscriptionChange(true,true,true,4)==SubscriptionChange::Ignore);
+ assert(!logicalSessionReady(false,true,newEpoch));assert(!logicalSessionReady(true,false,newEpoch));
+ assert(renewedEpoch(0,0)==1);assert(renewedEpoch(UINT32_MAX,UINT32_MAX)==1);
+ assert(!decode(bytes,23,c));bytes[2]=11;assert(!decode(bytes,24,c));bytes[2]=3;
  c.deadline=1000;assert(validRequest(c,123,7,0,0xfffffff0));
  uint8_t reply[16];result(reply,c,1);assert(reply[2]==4&&reply[3]==1&&u16(reply+12)==1);
+ // Explicit motor command is capability-gated by the sender. Its envelope
+ // keeps the normal replay/deadline/session rules, with no arbitrary registers.
+ bytes[2]=10;put16(bytes+18,0);put32(bytes+20,1);assert(decode(bytes,24,c));
+ assert(c.type==10&&c.value==1&&c.field==0);
+ assert(validRequest(c,123,7,0,1000));assert(!validRequest(c,123,7,1,1000));
+ put32(bytes+20,0);assert(decode(bytes,24,c));
+ put32(bytes+20,2);assert(!decode(bytes,24,c));put32(bytes+20,0xffffffff);assert(!decode(bytes,24,c));
+ put32(bytes+20,1);put16(bytes+18,0x3e89);assert(!decode(bytes,24,c));put16(bytes+18,0);
+ bytes[3]=1;assert(!decode(bytes,24,c));bytes[3]=0;put16(bytes+16,0);assert(!decode(bytes,24,c));put16(bytes+16,1);
+ assert(decode(bytes,24,c));result(reply,c,3,2);assert(reply[3]==3&&u16(reply+14)==2);
+ assert((MOTOR_CONTROL_FLAG|LOAD_READY_FLAG|UNLOAD_READY_FLAG)==0xe000);
+ assert(((MOTOR_CONTROL_FLAG|LOAD_READY_FLAG|UNLOAD_READY_FLAG)&0x07ff)==0);
+ assert(LOAD_PREPARE_FLAG==0x1000);
+ assert((LOAD_PREPARE_FLAG&(MOTOR_CONTROL_FLAG|LOAD_READY_FLAG|UNLOAD_READY_FLAG|0x07ff))==0);
  bytes[2]=5;put16(bytes+18,0);put32(bytes+20,0);assert(decode(bytes,24,c));
  assert(c.expectedPeer[0]==0); // Old clients retain unguarded native behavior.
  const uint8_t peer[6]={1,2,3,4,5,7};std::memcpy(bytes+18,peer,6);

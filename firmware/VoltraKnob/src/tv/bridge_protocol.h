@@ -9,11 +9,24 @@ constexpr const char* SERVICE="aed90001-4174-4ab6-a910-72457c592900";
 constexpr const char* COMMAND="aed90002-4174-4ab6-a910-72457c592900";
 constexpr const char* UPDATES="aed90003-4174-4ab6-a910-72457c592900";
 constexpr uint8_t MAGIC=0x4b,VERSION=2;
-constexpr size_t SNAPSHOT_BASE=134,MAX_SNAPSHOT=200;
+// Snapshot v3 adds device length units and resistance limits; command framing remains v2.
+constexpr uint8_t SNAPSHOT_VERSION=3;
+constexpr size_t SNAPSHOT_BASE=142,MAX_SNAPSHOT=208;
 // Byte 3 bit 5: CREATE_TWIN can bind the operation to an exact peer MAC.
 constexpr uint8_t TWIN_IDENTITY_GUARD_FLAG=0x20;
 constexpr uint8_t HANDOFF_CANDIDATE_FLAG=0x80;
 constexpr uint8_t MIXED_TWIN_HANDOFF_FLAG=0x40; // Snapshot byte 3, not weight flags.
+// Unused high bits of the parameter-edit mask at byte 28. Old receivers inspect
+// only parameter bits 0..10, so motor support is explicit and backwards compatible.
+constexpr uint16_t MOTOR_CONTROL_FLAG=0x8000,LOAD_READY_FLAG=0x4000,UNLOAD_READY_FLAG=0x2000;
+// The authenticated load command can refresh cable data with SETUP. This bit
+// admits that preparation only; LOAD_READY retains its fresh cable-zero meaning,
+// and the worker must independently verify every GO prerequisite after SETUP.
+constexpr uint16_t LOAD_PREPARE_FLAG=0x1000;
+// Byte 133 bits 0..1 advertise Create/Exit request readiness, including known
+// active states that this firmware safely unloads first. They never confirm
+// unloaded topology or authorize a load; receivers must inspect native state.
+// Older firmware advertised these bits only when already unloaded.
 // Optional v2 flags at byte 133, bits 2..3: 0 unknown, 1 lb, 2 kg.
 // Legacy bit 4 marked runtime wire weight; older unmarked values were cable force.
 // New snapshots never use those measurements for active resistance.
@@ -27,9 +40,9 @@ constexpr uint8_t TARGET_FORCE_FLAG=0x40;
 // Byte 133 bit 7: byte 22 is measured force from a fresh, loaded, moving B4
 // sample. Mutually exclusive with the runtime/target flags; length stays v2.
 constexpr uint8_t MOVING_FORCE_FLAG=0x80;
-// Weight Training on this knob uses the verified half-kg display scale.
-inline uint8_t weightUnitFlags(int mode,int rawUnit){
- const int unit=mode==1?1:rawUnit;
+// Unit preferences always come from the selected trainer, in every mode.
+inline uint8_t weightUnitFlags(int rawUnit){
+ const int unit=rawUnit;
  return unit==0?4:unit==1?8:0;
 }
 inline uint16_t u16(const uint8_t* p){return p[0]|uint16_t(p[1])<<8;}
@@ -50,7 +63,7 @@ inline void writeMovingWeight(uint8_t* snapshot,int32_t forceTenths){
 }
 struct Command {uint8_t type=0;uint32_t epoch=0,session=0,deadline=0;uint16_t id=0,field=0;int32_t value=0;char expectedPeer[18]{};bool handoff=false,offerReady=false;};
 inline bool decode(const uint8_t* p,size_t size,Command& out){
- if(!p||size!=24||p[0]!=MAGIC||p[1]!=VERSION||(p[2]!=2&&p[2]!=3&&p[2]!=5&&p[2]!=6&&p[2]!=7&&p[2]!=9)||(p[3]!=0&&!((p[2]==5||p[2]==7)&&p[3]==1)))return false;
+ if(!p||size!=24||p[0]!=MAGIC||p[1]!=VERSION||(p[2]!=2&&p[2]!=3&&p[2]!=5&&p[2]!=6&&p[2]!=7&&p[2]!=9&&p[2]!=10&&p[2]!=11)||(p[3]!=0&&!((p[2]==5||p[2]==7)&&p[3]==1)))return false;
  out={p[2],u32(p+4),u32(p+8),u32(p+12),u16(p+16),u16(p+18),static_cast<int32_t>(u32(p+20))};
  if((out.type==5||out.type==7)&&(out.field!=0||out.value!=0)){
    std::snprintf(out.expectedPeer,sizeof(out.expectedPeer),"%02X:%02X:%02X:%02X:%02X:%02X",p[18],p[19],p[20],p[21],p[22],p[23]);
@@ -60,6 +73,8 @@ inline bool decode(const uint8_t* p,size_t size,Command& out){
  if(out.handoff&&!out.expectedPeer[0])return false;
  if(out.type==7)return out.id==0&&(!out.offerReady||out.expectedPeer[0]);
  if(out.type==9)return out.id!=0&&out.field>=1&&out.field<=3&&out.value>0&&out.value<=65535;
+ if(out.type==11)return out.id==0&&out.field<=5&&out.value==0;
+ if(out.type==10)return out.id!=0&&out.field==0&&(out.value==0||out.value==1);
  return out.id!=0&&((out.type!=2&&out.type!=5&&out.type!=6)||out.field==0)&&((out.type!=5&&out.type!=6)||out.value==0);
 }
 inline bool encodeAddress(const char* address,uint8_t* out){
@@ -72,9 +87,18 @@ inline bool twinRequest(uint8_t* out,uint32_t epoch,uint32_t session,uint16_t id
  out[0]=MAGIC;out[1]=VERSION;out[2]=8;out[3]=0;
  put32(out+4,epoch);put32(out+8,session);put16(out+12,id);return true;
 }
-inline bool validRequest(const Command& c,uint32_t epoch,uint32_t session,uint16_t lastId,uint32_t now){
+inline const char* requestRejection(const Command& c,uint32_t epoch,uint32_t session,uint16_t lastId,uint32_t now){
  const int32_t remaining=static_cast<int32_t>(c.deadline-now);
- return epoch&&c.epoch==epoch&&c.session==session&&c.id>lastId&&remaining>0&&remaining<=2000;
+ if(!epoch)return "no-session";
+ if(c.epoch!=epoch)return "epoch";
+ if(c.session!=session)return "trainer-session";
+ if(c.id<=lastId)return "replay";
+ if(remaining<=0)return "expired";
+ if(remaining>2000)return "future-deadline";
+ return nullptr;
+}
+inline bool validRequest(const Command& c,uint32_t epoch,uint32_t session,uint16_t lastId,uint32_t now){
+ return requestRejection(c,epoch,session,lastId,now)==nullptr;
 }
 // Offers use their expiry as an independent monotonic heartbeat sequence. They
 // never advance the finite motor-command ID counter and cannot extend validity
@@ -84,8 +108,8 @@ inline bool validOffer(const Command& c,uint32_t epoch,uint32_t session,bool see
  return c.type==7&&c.id==0&&epoch&&c.epoch==epoch&&c.session==session&&remaining>0&&remaining<=2000&&
    (!seen||static_cast<int32_t>(c.deadline-previousDeadline)>0);
 }
-inline void result(uint8_t* p,const Command& c,uint8_t code){
+inline void result(uint8_t* p,const Command& c,uint8_t code,uint16_t reason=0){
  for(int i=0;i<16;++i)p[i]=0;
- p[0]=MAGIC;p[1]=VERSION;p[2]=4;p[3]=code;put32(p+4,c.epoch);put32(p+8,c.session);put16(p+12,c.id);
+ p[0]=MAGIC;p[1]=VERSION;p[2]=4;p[3]=code;put32(p+4,c.epoch);put32(p+8,c.session);put16(p+12,c.id);put16(p+14,reason);
 }
 }

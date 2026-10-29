@@ -14,7 +14,7 @@ inline TrainingReadout trainingReadout(const vlink::DeviceState& state,uint32_t 
                                       bool primaryPage,bool editing){
   TrainingReadout result;
   if(!vlink::fresh(state,now)||!voltra::supportedMode(state.mode))return result;
-  result.unloaded=primaryPage&&state.fitnessMode==4&&!state.loaded&&!state.armed;
+  result.unloaded=primaryPage&&voltra::fitnessModeReady(state.fitnessMode)&&!state.loaded&&!state.armed;
   if(!primaryPage||editing)return result;
   const auto active=vlink::movingWeightReading(state,now);
   if(active.source==vlink::ActiveWeightSource::CableForce){

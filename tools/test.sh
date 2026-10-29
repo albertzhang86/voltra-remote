@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
+python3 -m unittest discover -s test -p test_patch_nimble.py
+python3 -m unittest discover -s test -p test_patch_nimble_trace.py
+python3 -m unittest discover -s test -p test_motor_worker.py
 mkdir -p build/host
 SRC=firmware/VoltraKnob/src
 CXX="clang++ -std=c++17 -Wall -Wextra -I$SRC -Itest"
@@ -15,6 +18,9 @@ fi
 
 $CXX test/test_remote.cpp $SRC/protocol/voltra_protocol.cpp -o build/host/test_remote
 build/host/test_remote
+
+$CXX test/test_background_poll.cpp $SRC/protocol/voltra_protocol.cpp -o build/host/test_background_poll
+build/host/test_background_poll
 
 $CXX test/test_training_readout.cpp -o build/host/test_training_readout
 build/host/test_training_readout
@@ -36,3 +42,6 @@ build/host/test_tv_bridge
 
 $CXX test/test_twin.cpp $SRC/protocol/voltra_protocol.cpp -o build/host/test_twin
 build/host/test_twin
+
+$CXX test/test_att_trace.cpp -o build/host/test_att_trace
+build/host/test_att_trace

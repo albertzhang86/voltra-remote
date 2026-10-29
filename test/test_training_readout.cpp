@@ -15,6 +15,13 @@ int main(){
     state.mode=mode;state.fitnessMode=4;state.loaded=false;
     auto reading=remote::trainingReadout(state,1100,true,false);
     CHECK(reading.unloaded);CHECK(!reading.liveWeight); // Keep configured value, not zero.
+    state.fitnessMode=0x0104;reading=remote::trainingReadout(state,1100,true,false);
+    CHECK(reading.unloaded);CHECK(!reading.liveWeight); // Captured flagged ready state.
+    state.fitnessMode=0;reading=remote::trainingReadout(state,1100,true,false);
+    CHECK(reading.unloaded);CHECK(!reading.liveWeight);
+    state.fitnessMode=1;state.loaded=true;
+    reading=remote::trainingReadout(state,1100,true,false);
+    CHECK(!reading.unloaded);CHECK(reading.liveWeight);CHECK_EQ(reading.forceTenthsLb,60);
     state.fitnessMode=5;state.loaded=true;
     reading=remote::trainingReadout(state,1100,true,false);
     CHECK(!reading.unloaded);CHECK(reading.liveWeight);CHECK_EQ(reading.forceTenthsLb,60);

@@ -14,7 +14,9 @@ uint32_t millis(){return now;}
 static vlink::DeviceState device;
 static int loadCalls=0,unloadCalls=0;
 static int twinCalls=0;
-static bool rejectTwinRequest=false;
+static bool rejectTwinRequest=false,deferTwinRequest=false;
+static bool deferModeRequest=false,rejectModeRequest=false;
+static int modeCalls=0,modeTarget=-1;
 static int flushCalls=0;
 static uint16_t framebuffer[360*360];
 static bool touching=false;
@@ -26,6 +28,12 @@ namespace tvbridge {
 bool open=false,savedTv=false,tvConnected=false;
 int forgetCalls=0,findCalls=0;
 MixedTwinOffer mixedOffer;
+remote::SetupActivity externalSetup=remote::SetupActivity::None;
+remote::SetupActivity setupActivity(){
+ if(externalSetup!=remote::SetupActivity::None)return externalSetup;
+ if(device.twinPending)return device.twinCreating?remote::SetupActivity::CreateTwin:remote::SetupActivity::ExitTwin;
+ return mixedOffer.pending?remote::SetupActivity::CreateTwin:remote::SetupActivity::None;
+}
 uint32_t mixedOfferDeadline=0,mixedOfferSession=0;
 int mixedRequests=0;
 MixedTwinOffer mixedTwinOffer(){
@@ -34,15 +42,24 @@ MixedTwinOffer mixedTwinOffer(){
  }
  auto offer=mixedOffer;
  if((mixedOfferDeadline&&static_cast<int32_t>(now-mixedOfferDeadline)>=0)||
-    !vlink::twinSetupReady(device,now)||!device.endpoint.independent())offer.available=false;
+    !vlink::twinRequestReady(device,now)||!device.endpoint.independent())offer.available=false;
  return offer;
 }
-bool canRequestMixedTwin(){const auto offer=mixedTwinOffer();return offer.available&&!offer.pending&&vlink::twinSetupReady(device,now)&&device.endpoint.independent()&&ui::tvCanEdit();}
+bool canRequestMixedTwin(){const auto offer=mixedTwinOffer();return offer.available&&!offer.pending&&vlink::twinRequestReady(device,now)&&device.endpoint.independent()&&ui::tvCanEdit();}
 bool requestMixedTwin(){if(!canRequestMixedTwin())return false;++mixedRequests;mixedOffer.pending=true;strcpy(mixedOffer.message,"Waiting for TV...");return true;}
 void openPairing(){open=true;} void disconnect(){open=false;}
 bool connected(){return tvConnected;} bool pairing(){return open;} int passkey(){return open?123456:-1;}
 bool trusted(){return savedTv;} bool findingTrainers(){return false;} void findTrainers(){if(!tvConnected&&vlink::canSwitch(device,now))++findCalls;}
 bool forgetTvs(){++forgetCalls;savedTv=false;tvConnected=false;open=false;return true;}
+}
+static lv_obj_t* findLabel(lv_obj_t* parent,const char* text){
+ if(lv_obj_check_type(parent,&lv_label_class)&&!strcmp(lv_label_get_text(parent),text))return parent;
+ for(uint32_t i=0;i<lv_obj_get_child_count(parent);++i)if(auto* found=findLabel(lv_obj_get_child(parent,i),text))return found;
+ return nullptr;
+}
+static void assertSetup(const char* text){
+ auto* label=findLabel(lv_layer_top(),text);assert(label);
+ assert(!lv_obj_has_flag(lv_obj_get_parent(label),LV_OBJ_FLAG_HIDDEN));
 }
 static bool usbConnected=false;
 namespace board {bool usbPowerConnected(){return usbConnected;} int batteryPercent(){return 76;} void traceDial(const char*,int,int,int,int,int,bool,bool,uint32_t){} void setRingColor(uint32_t rgb){ringColor=rgb;} bool pollRotate(RotateEvent& ev){if(!rotation)return false;ev={static_cast<int8_t>(rotation),now};rotation=0;return true;}}
@@ -74,12 +91,18 @@ bool VoltraLink::requestLoad(uint32_t expectedSession){if(expectedSession!=UINT3
 bool VoltraLink::requestUnload(uint32_t expectedSession,UnloadSource){if(expectedSession!=UINT32_MAX&&expectedSession!=device.session)return false;++unloadCalls;return true;}
 bool VoltraLink::requestTwin(bool create,uint32_t,uint32_t,uint32_t,const char*,bool){
  ++twinCalls;if(rejectTwinRequest)return false;
- if(!canChangeTwin(device,now,create))return false;
+ if(!canRequestTwin(device,now,create))return false;
+ if(deferTwinRequest){device.twinCreating=create;device.twinPending=true;strcpy(device.message,"Unloading for Twin");return true;}
  device.twinConnection=create?2:0;device.endpoint.status=create?0x12:0;device.twinMs=device.endpointMs=now;
  strcpy(device.endpoint.peer,create?device.trainers[1-device.selected].address:"00:00:00:00:00:00");return true;
 }
 bool VoltraLink::requestWeightMode(){return requestMode(1);}
-bool VoltraLink::requestMode(int mode){if(!canSwitch(device,now)||!fresh(device,now))return false;device.mode=mode;device.fitnessMode=mode?4:0;return true;}
+bool VoltraLink::requestMode(int mode){
+ if(rejectModeRequest||!voltra::supportedMode(mode)||!twinControlReady(device,now)||!canSwitch(device,now)||!fresh(device,now))return false;
+ ++modeCalls;modeTarget=mode;
+ if(deferModeRequest){device.controlBusyUntil=now+6000;return true;}
+ device.mode=mode;device.fitnessMode=mode?4:0;device.statusMs=device.modeMs=++now;++device.modeRevision;return true;
+}
 }
 bool simulateAdvertising=true;
 void snapshot(const char* path){
@@ -88,7 +111,7 @@ void snapshot(const char* path){
  strcpy(device.endpoint.peer,device.twinConnection==2?device.trainers[1-(device.selected>=0?device.selected:0)].address:"00:00:00:00:00:00");
  device.endpointMs=device.twinConnection==2?device.twinMs:now;
  if(simulateAdvertising)for(auto& t:device.trainers){t.seen=true;t.lastSeenMs=now;}
- for(int i=0;i<10;++i){now+=20;device.statusMs=now;if(device.twinRoleMs&&now-device.twinRoleMs<3500)device.twinRoleMs=now;ui::loop();lv_timer_handler();}
+ for(int i=0;i<10;++i){now+=20;device.statusMs=device.modeMs=now;++device.modeRevision;if(device.twinRoleMs&&now-device.twinRoleMs<3500)device.twinRoleMs=now;ui::loop();lv_timer_handler();}
  FILE* f=fopen(path,"wb");fprintf(f,"P6\n360 360\n255\n");
  for(int y=0;y<360;++y)for(int x=0;x<360;++x){uint16_t p=framebuffer[y*360+x];unsigned char rgb[3]={static_cast<unsigned char>((p>>11)*255/31),static_cast<unsigned char>(((p>>5)&63)*255/63),static_cast<unsigned char>((p&31)*255/31)};if((x-180)*(x-180)+(y-180)*(y-180)>180*180)memset(rgb,0,3);fwrite(rgb,1,3,f);}fclose(f);
 }
@@ -102,7 +125,7 @@ int main(){
  strcpy(device.trainers[0].address,"10:20:30:aa:bb:01");strcpy(device.trainers[1].address,"10:20:30:aa:bb:02");
  strcpy(device.trainers[0].name,"VOLTRA - Left");strcpy(device.trainers[1].name,"VOLTRA - Right");
  for(auto& trainer:device.trainers){trainer.seen=true;trainer.lastSeenMs=now;}
- device.link=vlink::LinkState::Ready;device.mode=1;device.fitnessMode=4;device.weightLbs=61;device.chainsLbs=10;device.inverseChainsEnabled=0;device.cableCm=30;device.cableOffsetCm=0;device.cableMs=now;device.lengthUnitRaw=0;device.eccentricLbs=15;device.battery=86;device.reps=8;device.statusMs=100;device.settingsMs=100;device.selected=0;device.session=1;
+ device.weightUnitRaw=1;device.link=vlink::LinkState::Ready;device.mode=1;device.fitnessMode=4;device.weightLbs=61;device.chainsLbs=10;device.inverseChainsEnabled=0;device.cableCm=30;device.cableOffsetCm=0;device.cableMs=now;device.lengthUnitRaw=0;device.eccentricLbs=15;device.battery=86;device.reps=8;device.statusMs=100;device.settingsMs=100;device.selected=0;device.session=1;
  ui::begin();
  auto* batteryWidget=lv_obj_get_child(lv_layer_top(),-1);
  assert(!lv_obj_has_flag(batteryWidget,LV_OBJ_FLAG_CLICKABLE));
@@ -112,7 +135,7 @@ int main(){
  auto swipePointer=[&](bool left){
   const int before=unloadCalls;
   pointerX=left?210:150;pointerY=160;touching=true;snapshot("build/swipe-start.ppm");
-  for(int i=0;i<4;++i){pointerX+=left?-30:30;now+=35;device.statusMs=now;ui::loop();lv_timer_handler();}
+  for(int i=0;i<4;++i){pointerX+=left?-30:30;now+=35;device.statusMs=device.modeMs=now;ui::loop();lv_timer_handler();}
   touching=false;snapshot("build/swipe-end.ppm");
   assert(unloadCalls==before); // Swiping over a number must not unload.
  };
@@ -141,6 +164,16 @@ int main(){
  lv_obj_send_event(lv_obj_get_child(tvPanel,4),LV_EVENT_CLICKED,nullptr);
  swipePointer(true);assert(lv_obj_has_flag(toolsPanel,LV_OBJ_FLAG_HIDDEN));
  auto* selector=lv_obj_get_child(lv_screen_active(),-1);lv_obj_send_event(lv_obj_get_child(lv_obj_get_child(selector,2),0),LV_EVENT_CLICKED,nullptr);snapshot("build/preview-weight.ppm");
+ // Device units may change while connected; formatting never rewrites resistance.
+ const int unitWrites=settingCalls;const int beforeUnitWeight=device.weightLbs;
+ device.weightLbs=229;device.maximumForceLbs=229;device.weightUnitRaw=1;snapshot("build/preview-104kg.ppm");
+ assert(strcmp(lv_label_get_text(lv_obj_get_child(lv_screen_active(),4)),"104.0")==0);
+ device.weightUnitRaw=0;snapshot("build/preview-229lb.ppm");
+ assert(strcmp(lv_label_get_text(lv_obj_get_child(lv_screen_active(),4)),"229")==0);
+ assert(strcmp(lv_label_get_text(lv_obj_get_child(lv_screen_active(),6)),"lb")==0);
+ device.weightUnitRaw=-1;snapshot("build/preview-weight-unit-unknown.ppm");
+ assert(strcmp(lv_label_get_text(lv_obj_get_child(lv_screen_active(),4)),"--")==0);
+ assert(settingCalls==unitWrites);device.weightUnitRaw=1;device.weightLbs=beforeUnitWeight;device.maximumForceLbs=-1;
  // Twin: observed controller state, combined rounded weight, icon, disabled follower.
  device.weightLbs=179;device.twinConnection=2;device.twinMs=now;device.twinLastRole=1;device.twinRoleMs=now;
  snapshot("build/preview-twin-weight.ppm");
@@ -184,6 +217,27 @@ int main(){
  assert(!lv_obj_has_state(follower,LV_STATE_DISABLED));
  assert(lv_obj_has_flag(lv_obj_get_child(lv_screen_active(),7),LV_OBJ_FLAG_HIDDEN));
  assert(strcmp(lv_label_get_text(weightNumber),"27.5")==0);
+ // The native minimum is 2 kg per trainer, including the actual rendered base
+ // tile and dial step. Modifiers at the same raw value keep their regular grid.
+ const auto minimumBaseline=device;
+ device.weightLbs=5;device.chainsLbs=5;device.inverseChainsEnabled=0;device.eccentricLbs=5;
+ const int minimumLoads=loadCalls,minimumUnloads=unloadCalls;
+ for(bool paired:{false,true}){
+   device.twinConnection=paired?2:0;device.twinMs=device.twinRoleMs=now;
+   snapshot(paired?"build/preview-minimum-twin.ppm":"build/preview-minimum-single.ppm");
+   assert(!strcmp(lv_label_get_text(weightNumber),paired?"4.0":"2.0"));
+   assert(!strcmp(lv_label_get_text(lv_obj_get_child(lv_obj_get_child(lv_screen_active(),8),0)),paired?"4.0":"2.0"));
+   assert(!strcmp(lv_label_get_text(lv_obj_get_child(chainTab,0)),paired?"5.0":"2.5"));
+   assert(!strcmp(lv_label_get_text(lv_obj_get_child(eccentricTab,0)),paired?"5.0":"2.5"));
+   rotation=1;snapshot("build/minimum-step-up.ppm");snapshot("build/minimum-step-up-confirmed.ppm");
+   assert(device.weightLbs==6);
+   assert(!strcmp(lv_label_get_text(weightNumber),paired?"5.0":"2.5"));
+   rotation=-1;snapshot("build/minimum-step-down.ppm");snapshot("build/minimum-step-down-confirmed.ppm");
+   assert(device.weightLbs==5);
+   assert(!strcmp(lv_label_get_text(weightNumber),paired?"4.0":"2.0"));
+ }
+ assert(loadCalls==minimumLoads&&unloadCalls==minimumUnloads);
+ device=minimumBaseline;snapshot("build/minimum-baseline-restored.ppm");
  // Primary readouts keep configured settings at rest, show fresh cable force
  // during movement, and return to mode-specific settings when movement stops.
  const auto readoutBaseline=device;
@@ -367,6 +421,163 @@ int main(){
  for(int unsupported:{3,6,8,99}){device.mode=unsupported;snapshot("build/unsupported-mode.ppm");assert(!lv_obj_has_flag(modePanel,LV_OBJ_FLAG_HIDDEN));}
  device.mode=1;snapshot("build/supported-mode-return.ppm");assert(lv_obj_has_flag(modePanel,LV_OBJ_FLAG_HIDDEN));
  ++device.session;device.mode=1;snapshot("build/preview-initial-active-mode.ppm");assert(lv_obj_has_flag(modePanel,LV_OBJ_FLAG_HIDDEN));
+ // Real BLE mode changes are asynchronous: queue acceptance, mode readback,
+ // and usable fitness state arrive separately. The picker must never flash
+ // closed between them, accept a second command, or expose loading early.
+ deferModeRequest=true;device.mode=0;device.fitnessMode=0;device.controlBusyUntil=0;
+ snapshot("build/mode-async-idle.ppm");
+ auto* modeNotice=lv_obj_get_child(modePanel,5);auto* weightMode=lv_obj_get_child(modePanel,0);
+ const int beforeModes=modeCalls,beforeModeLoads=loadCalls;
+ lv_obj_send_event(weightMode,LV_EVENT_CLICKED,nullptr);
+ assert(modeCalls==beforeModes+1&&modeTarget==1&&device.mode==0);
+ assert(!lv_obj_has_flag(modePanel,LV_OBJ_FLAG_HIDDEN));assert(!ui::tvCanEdit());
+ for(int i=0;i<50;++i){now+=20;device.statusMs=now;ui::loop();lv_timer_handler();assert(!lv_obj_has_flag(modePanel,LV_OBJ_FLAG_HIDDEN));}
+ snapshot("build/preview-mode-starting.ppm");
+ assert(strcmp(lv_label_get_text(modeNotice),"Starting...")==0);
+ assert(strcmp(lv_label_get_text(name),"Weight\nTraining")==0);
+ assert(lv_obj_has_state(weightMode,LV_STATE_DISABLED));
+ lv_obj_send_event(band,LV_EVENT_CLICKED,nullptr);rotation=1;snapshot("build/mode-async-duplicate.ppm");
+ assert(modeCalls==beforeModes+1);assert(strcmp(lv_label_get_text(name),"Weight\nTraining")==0);
+ lv_obj_send_event(action,LV_EVENT_PRESSED,nullptr);lv_obj_send_event(action,LV_EVENT_CLICKED,nullptr);assert(loadCalls==beforeModeLoads);
+ device.mode=1;device.controlBusyUntil=0; // Mode confirmation does not require motor readiness.
+ snapshot("build/preview-mode-awaiting-fitness.ppm");assert(lv_obj_has_flag(modePanel,LV_OBJ_FLAG_HIDDEN));assert(!vlink::canLoad(device,now));
+ device.fitnessMode=4;snapshot("build/preview-mode-async-confirmed.ppm");
+ assert(lv_obj_has_flag(modePanel,LV_OBJ_FLAG_HIDDEN)&&ui::tvCanEdit());
+ snapshot("build/mode-async-stable.ppm");assert(lv_obj_has_flag(modePanel,LV_OBJ_FLAG_HIDDEN));
+ // Switching between mapped modes must also retain the old, real state until confirmation.
+ swipePointer(true);lv_obj_send_event(band,LV_EVENT_CLICKED,nullptr);snapshot("build/mode-async-old-active.ppm");
+ assert(device.mode==1&&!lv_obj_has_flag(modePanel,LV_OBJ_FLAG_HIDDEN));
+ device.mode=2;device.controlBusyUntil=0;snapshot("build/mode-async-band-confirmed.ppm");assert(lv_obj_has_flag(modePanel,LV_OBJ_FLAG_HIDDEN));
+ // Rejection and timeout leave a retryable picker, with no automatic resend.
+ device.mode=0;device.fitnessMode=0;snapshot("build/mode-async-reject-ready.ppm");rejectModeRequest=true;
+ lv_obj_send_event(weightMode,LV_EVENT_CLICKED,nullptr);snapshot("build/preview-mode-rejected.ppm");
+ assert(!lv_obj_has_flag(modePanel,LV_OBJ_FLAG_HIDDEN)&&ui::tvCanEdit());assert(strcmp(lv_label_get_text(modeNotice),"Try again")==0);
+ rejectModeRequest=false;lv_obj_send_event(weightMode,LV_EVENT_CLICKED,nullptr);const int acceptedModes=modeCalls;
+ now+=6100;snapshot("build/preview-mode-timeout.ppm");
+ assert(modeCalls==acceptedModes&&!lv_obj_has_flag(modePanel,LV_OBJ_FLAG_HIDDEN)&&ui::tvCanEdit());
+ assert(strcmp(lv_label_get_text(modeNotice),"Try again")==0);assert(!lv_obj_has_state(weightMode,LV_STATE_DISABLED));
+ lv_obj_send_event(weightMode,LV_EVENT_CLICKED,nullptr);assert(modeCalls==acceptedModes+1);
+ swipePointer(false);assert(!lv_obj_has_flag(modePanel,LV_OBJ_FLAG_HIDDEN)); // Do not present an accepted command as cancelled.
+ device.link=vlink::LinkState::Scanning;device.controlBusyUntil=0;snapshot("build/preview-mode-disconnected.ppm");
+ assert(ui::tvCanEdit());assert(strcmp(lv_label_get_text(modeNotice),"Connection lost")==0);
+ // A new trainer session clears the old request rather than accepting its late reply.
+ device.link=vlink::LinkState::Ready;snapshot("build/mode-async-reconnect.ppm");
+ lv_obj_send_event(weightMode,LV_EVENT_CLICKED,nullptr);assert(!ui::tvCanEdit());
+ ++device.session;device.controlBusyUntil=0;device.mode=4;device.fitnessMode=4;
+ snapshot("build/mode-async-session-changed.ppm");assert(lv_obj_has_flag(modePanel,LV_OBJ_FLAG_HIDDEN)&&ui::tvCanEdit());
+ // External loading during a pending request from a modifier must still expose unloading.
+ device.mode=1;device.fitnessMode=4;snapshot("build/mode-async-load-ready.ppm");
+ lv_obj_send_event(chainTab,LV_EVENT_CLICKED,nullptr);snapshot("build/mode-async-modifier.ppm");
+ swipePointer(true);lv_obj_send_event(band,LV_EVENT_CLICKED,nullptr);assert(!ui::tvCanEdit());
+ device.loaded=true;device.fitnessMode=5;
+ snapshot("build/mode-async-external-load.ppm");assert(lv_obj_has_flag(modePanel,LV_OBJ_FLAG_HIDDEN));
+ const int unloadBeforeMode=unloadCalls;lv_obj_send_event(action,LV_EVENT_PRESSED,nullptr);lv_obj_send_event(action,LV_EVENT_CLICKED,nullptr);
+ assert(unloadCalls==unloadBeforeMode+1);
+ device.loaded=false;device.fitnessMode=4;device.controlBusyUntil=0;deferModeRequest=false;
+ // P0 mode-picker acceptance uses real LVGL pointer hit-testing: dispatching
+ // CLICKED directly bypasses LV_STATE_DISABLED and concealed disabled controls.
+ // Renew canonical status/endpoint readbacks explicitly; never confirm mode in
+ // the request stub. Only the fixture's later hardware response changes mode.
+ deferModeRequest=true;device.twinConnection=0;device.mode=0;device.fitnessMode=0;
+ snapshot("build/p0-mode-pointer-idle.ppm");
+ auto modeFrames=[&](int duration,bool statusFresh=true,bool endpointFresh=true){
+   for(int elapsed=0;elapsed<duration;elapsed+=20){
+     now+=20;if(statusFresh){device.statusMs=device.modeMs=now;++device.modeRevision;}if(endpointFresh)device.endpointMs=now;
+     ui::loop();lv_timer_handler();
+   }
+ };
+ auto pointerTapMode=[&](lv_obj_t* target,bool statusFresh=true,bool endpointFresh=true){
+   lv_obj_update_layout(target);lv_area_t bounds;lv_obj_get_coords(target,&bounds);
+   pointerX=(bounds.x1+bounds.x2)/2;pointerY=(bounds.y1+bounds.y2)/2;
+   touching=true;modeFrames(80,statusFresh,endpointFresh);
+   touching=false;modeFrames(80,statusFresh,endpointFresh);
+ };
+ auto modeControls=[&](bool disabled){
+   for(int i=0;i<5;++i)assert(lv_obj_has_state(lv_obj_get_child(modePanel,i),LV_STATE_DISABLED)==disabled);
+ };
+ const int p0Loads=loadCalls,p0Unloads=unloadCalls,p0Settings=settingCalls;
+ const int p0ModeIds[]={1,2,4,7};
+ for(int cycle=0;cycle<3;++cycle)for(int index=0;index<4;++index){
+   // Both observed ready-state encodings must support every mode, retaining
+   // the raw value: the second complete cycle starts and confirms with 0x0104.
+   const int readyFitness=cycle==0?4:cycle==1?0x0104:0;
+   if(device.mode!=0){device.fitnessMode=readyFitness;modeFrames(40);}
+   if(lv_obj_has_flag(modePanel,LV_OBJ_FLAG_HIDDEN))swipePointer(true);
+   assert(!lv_obj_has_flag(modePanel,LV_OBJ_FLAG_HIDDEN));modeControls(false);
+   const int oldMode=device.mode,accepted=modeCalls;
+   if(cycle==0)pointerTapMode(lv_obj_get_child(modePanel,index));
+   else{rotation=1;modeFrames(40);pointerTapMode(center);} // Dial then actual center tap.
+   assert(modeCalls==accepted+1&&modeTarget==p0ModeIds[index]&&device.mode==oldMode);
+   assert(!lv_obj_has_flag(modePanel,LV_OBJ_FLAG_HIDDEN)&&!ui::tvCanEdit());modeControls(true);
+   pointerTapMode(lv_obj_get_child(modePanel,(index+1)%4));pointerTapMode(center);
+   assert(modeCalls==accepted+1&&device.mode==oldMode); // Disabled hit targets do not enqueue.
+   modeFrames(240);assert(!lv_obj_has_flag(modePanel,LV_OBJ_FLAG_HIDDEN));
+   device.mode=0;device.fitnessMode=0;modeFrames(200);
+   assert(!lv_obj_has_flag(modePanel,LV_OBJ_FLAG_HIDDEN));
+   device.mode=p0ModeIds[index];device.controlBusyUntil=0;modeFrames(200);
+   assert(lv_obj_has_flag(modePanel,LV_OBJ_FLAG_HIDDEN));
+   if(cycle==0&&index==0)snapshot("build/preview-p0-mode-pointer-starting.ppm");
+   if(cycle==1&&index==0){
+     device.fitnessMode=0x0204;modeFrames(200); // Unknown high bytes never prove ready.
+     assert(lv_obj_has_flag(modePanel,LV_OBJ_FLAG_HIDDEN)&&!vlink::canLoad(device,now));
+   }
+   device.fitnessMode=readyFitness;modeFrames(200);
+   assert(lv_obj_has_flag(modePanel,LV_OBJ_FLAG_HIDDEN)&&ui::tvCanEdit());
+   // Reopen immediately after confirmation and confirm the same mode using the
+   // actual center hit target: navigation only, with all buttons re-enabled.
+   swipePointer(true);modeControls(false);pointerTapMode(center);
+   assert(lv_obj_has_flag(modePanel,LV_OBJ_FLAG_HIDDEN)&&modeCalls==accepted+1);
+ }
+ // Firmware 2.0 reports 0 unloaded and 1 loaded. A real center tap queues
+ // exactly one load; a new loaded report changes the same target to unload.
+ device.mode=1;device.fitnessMode=0;device.loaded=false;device.controlBusyUntil=0;
+ device.settingsMs=now;modeFrames(40);
+ const int fw2Loads=loadCalls,fw2Unloads=unloadCalls;
+ assert(vlink::canLoad(device,now));
+ pointerTapMode(center);assert(loadCalls==fw2Loads+1);
+ modeFrames(100);assert(loadCalls==fw2Loads+1);
+ device.fitnessMode=1;device.loaded=true;modeFrames(100);
+ pointerTapMode(center);assert(unloadCalls==fw2Unloads+1);
+ device.fitnessMode=4;device.loaded=false;modeFrames(100);
+ // Unknown 0x0204 leaves the confirmed mode visible but blocks mode changes.
+ // A later ordinary ready readback enables navigation and a real pointer tap.
+ device.mode=2;device.fitnessMode=0x0204;modeFrames(200);
+ assert(lv_obj_has_flag(modePanel,LV_OBJ_FLAG_HIDDEN));assert(!vlink::canSwitch(device,now));
+ const int unknownModeCalls=modeCalls;swipePointer(true);
+ assert(lv_obj_has_flag(modePanel,LV_OBJ_FLAG_HIDDEN));
+ assert(modeCalls==unknownModeCalls&&device.mode==2&&device.fitnessMode==0x0204);
+ device.fitnessMode=4;modeFrames(200);assert(lv_obj_has_flag(modePanel,LV_OBJ_FLAG_HIDDEN));
+ swipePointer(true);modeControls(false);pointerTapMode(weightMode);
+ assert(modeCalls==unknownModeCalls+1&&modeTarget==1&&device.mode==2);
+ device.mode=1;device.fitnessMode=4;device.controlBusyUntil=0;modeFrames(200);
+ assert(lv_obj_has_flag(modePanel,LV_OBJ_FLAG_HIDDEN));
+ assert(loadCalls==p0Loads+1&&unloadCalls==p0Unloads+1&&settingCalls==p0Settings);
+ // A rejected request leaves tappable controls; stale endpoints must also be
+ // rejected by the real link gate rather than the former permissive test stub.
+ device.mode=0;device.fitnessMode=0;snapshot("build/p0-mode-pointer-reject-ready.ppm");
+ const int beforePointerReject=modeCalls;rejectModeRequest=true;pointerTapMode(weightMode);
+ assert(modeCalls==beforePointerReject);modeControls(false);assert(strcmp(lv_label_get_text(modeNotice),"Try again")==0);
+ rejectModeRequest=false;device.endpointMs=0;pointerTapMode(weightMode,true,false);
+ assert(modeCalls==beforePointerReject);modeControls(false);
+ modeFrames(40);pointerTapMode(weightMode);assert(modeCalls==beforePointerReject+1);modeControls(true);
+ device.controlBusyUntil=now+10000; // Production worker timeout, not the queue's 6s window.
+ modeFrames(6100);modeControls(true);assert(strcmp(lv_label_get_text(modeNotice),"Starting...")==0);
+ pointerTapMode(weightMode);assert(modeCalls==beforePointerReject+1); // No false retry affordance.
+ modeFrames(4000);modeControls(false);assert(strcmp(lv_label_get_text(modeNotice),"Try again")==0);
+ pointerTapMode(weightMode);assert(modeCalls==beforePointerReject+2);modeControls(true);
+ // Disconnect cancels the UI wait and does not replay an accepted command.
+ device.link=vlink::LinkState::Scanning;device.controlBusyUntil=0;modeFrames(40,false,false);modeControls(false);
+ assert(strcmp(lv_label_get_text(modeNotice),"Connection lost")==0);
+ pointerTapMode(weightMode,false,false);assert(modeCalls==beforePointerReject+2);
+ device.link=vlink::LinkState::Ready;modeFrames(40);pointerTapMode(weightMode);
+ assert(modeCalls==beforePointerReject+3);modeControls(true);
+ // A replacement trainer session clears pending styles before the first tap.
+ ++device.session;device.controlBusyUntil=0;modeFrames(40);modeControls(false);
+ assert(!lv_obj_has_flag(modePanel,LV_OBJ_FLAG_HIDDEN)&&ui::tvCanEdit());
+ pointerTapMode(weightMode);assert(modeCalls==beforePointerReject+4);modeControls(true);
+ device.mode=1;device.fitnessMode=4;device.controlBusyUntil=0;modeFrames(200);
+ assert(lv_obj_has_flag(modePanel,LV_OBJ_FLAG_HIDDEN));
+ deferModeRequest=false;
  device.mode=2;device.fitnessMode=4;device.lengthUnitRaw=0;device.weightUnitRaw=1;device.twinConnection=2;device.twinMs=now;device.twinLastRole=1;device.twinRoleMs=now;device.modeValues[0]=106;device.modeValueMs[0]=now;device.modeValues[1]=150;device.modeValueMs[1]=now;
  snapshot("build/preview-band-max-kg.ppm");assert(strcmp(lv_label_get_text(action),"48.0")==0);
  assert(strcmp(lv_label_get_text(lv_obj_get_child(lv_screen_active(),6)),"Max kg")==0);
@@ -455,12 +666,12 @@ int main(){
  swipePointer(true);assert(lv_obj_has_flag(modePanel,LV_OBJ_FLAG_HIDDEN));
  device.loaded=true;device.fitnessMode=5;snapshot("build/iso-load-ack.ppm");const int isoStopBefore=unloadCalls;lv_obj_send_event(action,LV_EVENT_PRESSED,nullptr);lv_obj_send_event(action,LV_EVENT_CLICKED,nullptr);assert(unloadCalls==isoStopBefore+1);
  device.loaded=false;device.fitnessMode=4;device.modeValueMs[7]=0;snapshot("build/iso-stale.ppm");assert(strcmp(lv_label_get_text(action),"--")==0);
- device.mode=1;device.fitnessMode=999;snapshot("build/unmapped-state.ppm");assert(!lv_obj_has_flag(modePanel,LV_OBJ_FLAG_HIDDEN));
+ device.mode=1;device.fitnessMode=999;snapshot("build/unmapped-state.ppm");assert(lv_obj_has_flag(modePanel,LV_OBJ_FLAG_HIDDEN));assert(!vlink::canLoad(device,now));
  device.fitnessMode=4;snapshot("build/mapped-state-return.ppm");assert(lv_obj_has_flag(modePanel,LV_OBJ_FLAG_HIDDEN));
  device.mode=2;device.fitnessMode=4;device.loaded=false;device.selected=0;device.twinConnection=2;device.twinMs=now;device.twinLastRole=2;device.twinRoleMs=now;
  lv_obj_send_event(lv_obj_get_child(lv_screen_active(),1),LV_EVENT_CLICKED,nullptr);snapshot("build/preview-role-swapped.ppm");
  assert(!lv_obj_has_state(lv_obj_get_child(lv_obj_get_child(selector,2),0),LV_STATE_DISABLED));assert(lv_obj_has_state(lv_obj_get_child(lv_obj_get_child(selector,2),1),LV_STATE_DISABLED));
- device.loaded=true;device.fitnessMode=5;lv_obj_send_event(lv_obj_get_child(selector,3),LV_EVENT_CLICKED,nullptr);snapshot("build/controller-switch-loaded.ppm");assert(lv_obj_has_state(lv_obj_get_child(lv_obj_get_child(selector,2),1),LV_STATE_DISABLED));
+ device.loaded=true;device.fitnessMode=5;snapshot("build/controller-switch-loaded.ppm");assert(lv_obj_has_state(lv_obj_get_child(lv_obj_get_child(selector,2),1),LV_STATE_DISABLED));
  device.loaded=false;device.fitnessMode=4;device.mode=0;device.twinMs=now;snapshot("build/preview-twin-exit-ready.ppm");
  lv_obj_send_event(lv_obj_get_child(selector,3),LV_EVENT_CLICKED,nullptr);snapshot("build/preview-twin-exited.ppm");assert(!lv_obj_has_state(lv_obj_get_child(lv_obj_get_child(selector,2),1),LV_STATE_DISABLED));
  lv_obj_send_event(lv_obj_get_child(lv_obj_get_child(selector,2),1),LV_EVENT_CLICKED,nullptr);assert(device.selected==1);
@@ -499,10 +710,29 @@ int main(){
  assert(tvbridge::findCalls==beforeFindCalls+1);
  tvbridge::tvConnected=false;tvbridge::open=true;lv_obj_send_event(lv_obj_get_child(lv_screen_active(),1),LV_EVENT_CLICKED,nullptr);
  assert(tvbridge::findCalls==beforeFindCalls+1);tvbridge::open=priorPairing;
- device.loaded=true;device.fitnessMode=5;snapshot("build/preview-twin-unload-required.ppm");
- assert(lv_obj_has_state(twinAction,LV_STATE_DISABLED));
- assert(!strcmp(lv_label_get_text(connectionNotice),"Unload both trainers first"));
- lv_obj_send_event(twinAction,LV_EVENT_CLICKED,nullptr);assert(twinCalls==beforeTwinRequests+8);
+ // Real pointer clicks admit loaded Create/Exit, show pending preparation,
+ // and cannot dispatch again while waiting. The asynchronous fixture only
+ // publishes success after a later native unloaded/topology readback.
+ deferTwinRequest=true;
+ const int loadedTwinStart=twinCalls,loadedTwinLoadCalls=loadCalls;
+ for(int mode:{1,2,4,7})for(int fitness:{5,21,0x26,0x27})for(bool paired:{false,true}){
+   device.mode=mode;device.loaded=voltra::fitnessModeLoaded(fitness);device.armed=voltra::fitnessModeArmed(fitness);device.fitnessMode=fitness;
+   device.twinConnection=paired?2:0;device.twinMs=now;device.trainers[1].lastSeenMs=now;
+   snapshot("build/preview-twin-auto-unload-ready.ppm");
+   assert(!lv_obj_has_state(twinAction,LV_STATE_DISABLED));
+   assert(!strcmp(lv_label_get_text(connectionNotice),"Unloads before changing Twin"));
+   const int before=twinCalls;pointerTapMode(twinAction);
+   snapshot("build/preview-twin-auto-unload-pending.ppm");
+   assert(twinCalls==before+1&&device.twinPending&&(device.loaded||device.armed));
+   assert(lv_obj_has_state(twinAction,LV_STATE_DISABLED));
+   assert(!strcmp(lv_label_get_text(connectionNotice),remote::setupActivityLabel(tvbridge::setupActivity())));
+   pointerTapMode(twinAction);assert(twinCalls==before+1);
+   device.loaded=false;device.armed=false;device.fitnessMode=fitness==5?4:0x0104;device.twinPending=false;
+   device.twinConnection=paired?0:2;device.twinMs=now;
+   snapshot("build/preview-twin-auto-unload-complete.ppm");
+   assert(device.endpoint.paired()==!paired&&!device.loaded&&!lv_obj_has_state(twinAction,LV_STATE_DISABLED));
+ }
+ assert(twinCalls==loadedTwinStart+32&&loadCalls==loadedTwinLoadCalls);deferTwinRequest=false;
  device.loaded=false;device.fitnessMode=4;device.mode=1;device.trainers[1].lastSeenMs=now;
  snapshot("build/preview-twin-retry-ready.ppm");rejectTwinRequest=true;
  lv_obj_send_event(twinAction,LV_EVENT_CLICKED,nullptr);snapshot("build/preview-twin-request-rejected.ppm");
@@ -512,9 +742,26 @@ int main(){
  // misrepresented as nearby or enabling an unverified pairing command.
  device.discoveryPausedForTv=true;device.trainers[1].seen=false;snapshot("build/preview-saved-reconnect.ppm");
  assert(!lv_obj_has_flag(twinAction,LV_OBJ_FLAG_HIDDEN));
- assert(lv_obj_has_state(twinAction,LV_STATE_DISABLED));
- assert(!strcmp(lv_label_get_text(connectionNotice),"Swipe right · Find trainers"));
+ assert(!lv_obj_has_state(twinAction,LV_STATE_DISABLED));
+ assert(!strcmp(lv_label_get_text(connectionNotice),"Checks saved second trainer"));
  assert(strcmp(lv_label_get_text(lv_obj_get_child(absent,1)),"Saved · Reconnect")==0);
+ // Firmware 2.0 motor=0 and legacy motor=4 both admit a single request with
+ // scanning paused. The actual pointer must not immediately imply pairing or
+ // permit repeat requests while the live peer handshake is pending.
+ const int savedTwinStart=twinCalls,savedLoadCalls=loadCalls,savedStopCalls=unloadCalls;
+ deferTwinRequest=true;
+ for(int mode:{1,2,4,7})for(int fitness:{0,4}){
+   device.mode=mode;device.fitnessMode=fitness;device.loaded=device.armed=false;
+   snapshot("build/preview-saved-twin-check.ppm");
+   assert(!lv_obj_has_state(twinAction,LV_STATE_DISABLED));
+   const int before=twinCalls;pointerTapMode(twinAction);
+   snapshot("build/preview-saved-twin-checking.ppm");
+   assert(twinCalls==before+1&&device.twinPending&&!device.endpoint.paired());
+   pointerTapMode(twinAction);assert(twinCalls==before+1);
+   device.twinPending=false;
+ }
+ assert(twinCalls==savedTwinStart+8&&loadCalls==savedLoadCalls&&unloadCalls==savedStopCalls);
+ deferTwinRequest=false;device.mode=1;device.fitnessMode=4;
  // A fresh trusted-TV offer exposes its connected peer without a BLE advertisement.
  // Create requests a TV handoff; it must never call the local native pairing path.
  const bool previousTvConnected=tvbridge::tvConnected,previousSavedTv=tvbridge::savedTv;
@@ -545,9 +792,9 @@ int main(){
  assert(!lv_obj_has_state(twinAction,LV_STATE_DISABLED)&&lv_obj_has_state(absent,LV_STATE_DISABLED));
  device.loaded=true;device.fitnessMode=5;
  snapshot("build/preview-twin-tv-owned-loaded.ppm");
- assert(lv_obj_has_state(twinAction,LV_STATE_DISABLED)&&lv_obj_has_state(absent,LV_STATE_DISABLED));
+ assert(!lv_obj_has_state(twinAction,LV_STATE_DISABLED)&&lv_obj_has_state(absent,LV_STATE_DISABLED));
  assert(!strcmp(lv_label_get_text(lv_obj_get_child(absent,1)),"Connected to TV"));
- assert(!strcmp(lv_label_get_text(connectionNotice),"Unload both trainers first"));
+ assert(!strcmp(lv_label_get_text(connectionNotice),"TV unloads both, then pairs"));
  device.loaded=false;device.fitnessMode=4;tvbridge::mixedOffer.available=false;
  snapshot("build/preview-twin-tv-owned-not-ready.ppm");
  assert(vlink::canSwitch(device,now)); // Only the TV peer is busy, so local switching would otherwise be permitted.
@@ -559,20 +806,34 @@ int main(){
  lv_obj_send_event(twinAction,LV_EVENT_CLICKED,nullptr);snapshot("build/preview-twin-tv-pending.ppm");
  assert(tvbridge::mixedRequests==mixedBefore+1&&twinCalls==localTwinBefore&&!device.endpoint.paired());
  assert(lv_obj_has_state(twinAction,LV_STATE_DISABLED));
- assert(!strcmp(lv_label_get_text(lv_obj_get_child(twinAction,0)),"Updating..."));
- assert(!strcmp(lv_label_get_text(connectionNotice),"Waiting for TV..."));
+ assertSetup("Creating Twin");
  // Releasing the TV's GATT ownership does not expose a local-connect action
  // while the handoff is pending, even after its initial offer has expired.
  tvbridge::mixedOffer.owned=false;tvbridge::mixedOffer.available=false;now+=6000;
  snapshot("build/preview-twin-tv-released-pending.ppm");
  assert(lv_obj_has_state(absent,LV_STATE_DISABLED)&&lv_obj_has_state(twinAction,LV_STATE_DISABLED));
- assert(!strcmp(lv_label_get_text(lv_obj_get_child(absent,1)),"Joining Twin..."));
+ assertSetup("Creating Twin");
  lv_obj_send_event(absent,LV_EVENT_CLICKED,nullptr);lv_obj_send_event(twinAction,LV_EVENT_CLICKED,nullptr);
  assert(device.selected==0&&tvbridge::mixedRequests==mixedBefore+1&&twinCalls==localTwinBefore);
  tvbridge::mixedOffer.owned=true;tvbridge::mixedOffer.pending=false;
  strcpy(tvbridge::mixedOffer.message,"TV could not release trainer");
  snapshot("build/preview-twin-tv-failed.ppm");
  assert(!strcmp(lv_label_get_text(connectionNotice),"TV could not release trainer"));
+ // TV setup intent survives trainer-session churn and temporary mode 0, without
+ // drawing the mode picker or letting a dial/tap change resistance behind it.
+ const auto beforeSetup=device;const int beforeSettings=settingCalls,beforeLoads=loadCalls;
+ for(auto activity:{remote::SetupActivity::CreateTwin,remote::SetupActivity::ExitTwin}){
+  tvbridge::externalSetup=activity;
+  for(auto link:{vlink::LinkState::Ready,vlink::LinkState::Scanning,vlink::LinkState::Connecting,vlink::LinkState::Handshaking}){
+   device.link=link;device.mode=0;++device.session;rotation=1;
+   snapshot(activity==remote::SetupActivity::CreateTwin?"build/preview-creating-twin.ppm":"build/preview-exiting-twin.ppm");
+   assertSetup(remote::setupActivityLabel(activity));
+   assert(settingCalls==beforeSettings&&loadCalls==beforeLoads&&rotation==0);
+  }
+ }
+ tvbridge::externalSetup=remote::SetupActivity::None;device=beforeSetup;
+ snapshot("build/preview-twin-progress-complete.ppm");
+ assert(lv_obj_has_flag(lv_obj_get_parent(findLabel(lv_layer_top(),"Exiting Twin")),LV_OBJ_FLAG_HIDDEN));
  // TV-owned peers can be displayed without taking a saved slot or duplicating advertisements.
  const auto tvPeerSaved=device.trainers[1];device.trainers[1]={};
  tvbridge::mixedOffer.available=true;tvbridge::mixedOffer.message[0]=0;

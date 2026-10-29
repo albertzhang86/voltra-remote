@@ -1,6 +1,7 @@
 #include "minitest.h"
 #include "app/remote_model.h"
 #include "link/voltra_link.h"
+#include "link/poll_write_policy.h"
 #include "protocol/voltra_protocol.h"
 #include <cstring>
 using namespace remote;
@@ -9,6 +10,277 @@ static void endpoint(vlink::DeviceState& s,uint32_t now,bool paired=false){
  strcpy(s.endpoint.local,"02:00:00:00:00:01");strcpy(s.endpoint.peer,paired?"02:00:00:00:00:02":"00:00:00:00:00:00");
 }
 int main(){
+ for(int maximum:{100,200,229,230,250}){
+   vlink::DeviceState s;s.maximumForceLbs=maximum;s.eccentricLbs=0;s.weightLbs=maximum;
+   CHECK_EQ(vlink::maximumWeight(s),maximum);
+   CHECK(vlink::validWeightSetting(s,vlink::Parameter::Weight,maximum));
+   CHECK(!vlink::validWeightSetting(s,vlink::Parameter::Weight,maximum+1));
+   CHECK(vlink::validWeightSetting(s,vlink::Parameter::Eccentric,5-maximum));
+   CHECK(!vlink::validWeightSetting(s,vlink::Parameter::Eccentric,1));
+ }
+ {vlink::DeviceState s;CHECK_EQ(vlink::maximumWeight(s),200);s.maximumForceLbs=65535;CHECK_EQ(vlink::maximumWeight(s),200);}
+ {Editor pounds;pounds.observe(61);pounds.turn(1,true,false,100,5,229,true,true);CHECK_EQ(pounds.target,62);}
+
+ // Authenticated motor requests share native controller/cable guards across
+ // all four modes, including confirmed Twin. No cached cable authorizes GO.
+ for(bool paired:{false,true})for(int mode:{1,2,4,7})for(int ready:{0,4,0x0104}){
+   using vlink::MotorFailure;
+   vlink::DeviceState s;s.session=12;s.selected=0;s.link=vlink::LinkState::Ready;
+   s.mode=mode;s.fitnessMode=ready;s.modeMs=s.statusMs=s.settingsMs=1000;s.weightLbs=5;s.chainsLbs=s.eccentricLbs=0;s.weightUnitRaw=1;
+   s.inverseChainsEnabled=0;for(auto& stamp:s.weightSettingMs)stamp=1000;
+   s.modeValues[0]=15;s.modeValueMs[0]=1000;s.modeValues[5]=0;s.modeValueMs[5]=1000;
+   s.modeValues[7]=100;s.modeValueMs[7]=1000;
+   for(int i=0;i<voltra::MODE_PARAMETER_COUNT;++i)if(voltra::MODE_PARAMETERS[i].mode==mode)s.modeValueMs[i]=1000;
+   s.cableCm=s.cableOffsetCm=0;s.cableMs=s.cableOffsetMs=1000;
+   endpoint(s,1000,paired);strcpy(s.trainers[0].address,s.endpoint.local);
+   const char* peer=paired?"02:00:00:00:00:02":"";
+   CHECK(vlink::tvMotorFailure(s,true,1001)==MotorFailure::None);
+   CHECK(vlink::tvMotorFailure(s,false,1001)==MotorFailure::None);
+   const auto expected=vlink::motorConfiguration(s,1001);CHECK(expected.valid);
+   CHECK(vlink::motorConfigurationFailure(s,expected,1001)==MotorFailure::None);
+   CHECK(vlink::motorConfigurationFailure(s,expected,1001,1001)==MotorFailure::ConfigurationUnknown);
+   for(int i=0;i<voltra::MODE_PARAMETER_COUNT;++i)if(vlink::motorConfigurationField(mode,i)){
+     int* values[]={&s.weightLbs,&s.chainsLbs,&s.inverseChainsEnabled,&s.eccentricLbs};
+     int& changed=mode==1?*values[i]:s.modeValues[i];
+     const int previous=changed;changed=previous+1;
+     CHECK(vlink::motorConfigurationFailure(s,expected,1001)==MotorFailure::ConfigurationChanged);
+     changed=previous;
+     uint32_t& stamp=mode==1?s.weightSettingMs[i]:s.modeValueMs[i];stamp=0;
+     CHECK(vlink::motorConfigurationFailure(s,expected,1001)==MotorFailure::ConfigurationUnknown);
+     CHECK(vlink::tvMotorFailure(s,true,1001)!=MotorFailure::None);
+     CHECK(vlink::tvMotorFailure(s,false,1001)==MotorFailure::None);
+     stamp=1000;
+   }
+   for(int i=0;i<voltra::MODE_PARAMETER_COUNT;++i)if(vlink::motorConfigurationField(mode,i))
+     (mode==1?s.weightSettingMs[i]:s.modeValueMs[i])=1100;
+   CHECK(vlink::motorConfigurationFailure(s,expected,1101,1001)==MotorFailure::None);
+   for(auto& stamp:s.weightSettingMs)stamp=1000;
+   for(int i=0;i<voltra::MODE_PARAMETER_COUNT;++i)if(voltra::MODE_PARAMETERS[i].mode==mode)s.modeValueMs[i]=1000;
+   CHECK(vlink::motorEndpointMatches(s,12,mode,peer,1001));
+   CHECK(!vlink::motorEndpointMatches(s,13,mode,peer,1001));
+   CHECK(!vlink::motorEndpointMatches(s,12,0,peer,1001));
+   CHECK(!vlink::motorEndpointMatches(s,12,mode,"02:00:00:00:00:03",1001));
+   s.motorPending=true;CHECK(!vlink::canLoad(s,1001));CHECK(!vlink::canSwitch(s,1001));
+   CHECK(vlink::tvMotorFailure(s,true,1001)==MotorFailure::None); // Owning worker still rechecks safety.
+   s.motorPending=false;
+   s.cableCm=1;CHECK(vlink::tvMotorFailure(s,true,1001)==MotorFailure::None);
+   s.cableCm=2;CHECK(vlink::tvMotorFailure(s,true,1001)==MotorFailure::CableNotZero);
+   CHECK(vlink::tvMotorFailure(s,false,1001)==MotorFailure::None); // Unload never needs cable zero.
+   s.cableOffsetCm=10;s.cableCm=11;CHECK(vlink::tvMotorFailure(s,true,1001)==MotorFailure::None);
+   s.cableCm=12;CHECK(vlink::tvMotorFailure(s,true,1001)==MotorFailure::CableNotZero);
+   s.cableCm=s.cableOffsetCm=0;s.cableMs=0;CHECK(vlink::tvMotorFailure(s,true,1001)==MotorFailure::CableUnknown);
+   s.cableMs=1000;s.cableOffsetMs=0;CHECK(vlink::tvMotorFailure(s,true,1001)==MotorFailure::CableUnknown);
+   s.cableOffsetMs=1000;CHECK(vlink::tvMotorFailure(s,true,2500)==MotorFailure::CableUnknown);
+   CHECK(!vlink::motorSetupReadback(s,1000,1000,1001));
+   s.cableMs=1010;CHECK(!vlink::motorSetupReadback(s,1000,1000,1001));
+   s.cableOffsetMs=1010;CHECK(vlink::motorSetupReadback(s,1000,1000,1001));
+   CHECK(!vlink::motorSetupReadback(s,999,999,1011));
+   s.fitnessMode=5;s.loaded=true;
+   CHECK(vlink::tvMotorFailure(s,true,1011)==MotorFailure::State);
+   CHECK(vlink::tvMotorFailure(s,false,1011)==MotorFailure::None);
+   CHECK(!vlink::motorConfirmed(s,true,1000,1001,1011)); // Pre-command status is not confirmation.
+   s.statusMs=1011;CHECK(vlink::motorConfirmed(s,true,1000,1001,1012));
+   CHECK(!vlink::motorConfirmed(s,false,1000,1001,1012));
+   CHECK(!vlink::motorConfirmed(s,true,1000,1012,1013));
+   s.fitnessMode=ready;s.loaded=false;CHECK(vlink::motorConfirmed(s,false,1000,1001,1012));
+   s.fitnessMode=0x26;s.armed=true;CHECK(!vlink::motorConfirmed(s,false,1000,1001,1012));
+   CHECK(!vlink::motorConfirmed(s,true,1000,1001,1012));
+   s.fitnessMode=0x0204;s.armed=false;CHECK(vlink::tvMotorFailure(s,false,1012)==MotorFailure::State);
+   s.fitnessMode=ready;s.endpointMs=0;CHECK(vlink::tvMotorFailure(s,true,1012)==MotorFailure::State);
+
+   // A Twin transition may have no cable-zero cache, or a slow background
+   // read may be older than 1.5 s. Both may enter the authenticated read-only
+   // preparation phase. Only fresh SETUP replies can pass the GO commit gate.
+   for(bool missing:{false,true}){
+     s.modeMs=s.statusMs=s.settingsMs=3000;endpoint(s,3000,paired);
+     s.cableCm=s.cableOffsetCm=0;s.cableMs=s.cableOffsetMs=missing?0:1000;
+     for(auto& stamp:s.weightSettingMs)stamp=3000;
+     for(int i=0;i<voltra::MODE_PARAMETER_COUNT;++i)
+       if(voltra::MODE_PARAMETERS[i].mode==mode)s.modeValueMs[i]=3000;
+     CHECK(vlink::tvMotorPreparationFailure(s,true,3001)==MotorFailure::None);
+     CHECK(vlink::tvMotorFailure(s,true,3001)==MotorFailure::CableUnknown);
+     const auto config=vlink::motorConfiguration(s,3001);
+     const auto priorCable=s.cableMs,priorOffset=s.cableOffsetMs;
+     const uint32_t queriedAt=3002;
+     auto commit=[&](uint32_t now){return vlink::motorLoadCommitFailure(s,12,mode,peer,config,
+       priorCable,priorOffset,queriedAt,now);};
+     CHECK(commit(3003)==MotorFailure::CableUnknown); // No SETUP response, no GO.
+     s.cableMs=3010;CHECK(commit(3011)==MotorFailure::CableUnknown);
+     s.cableOffsetMs=3010;CHECK(commit(3011)==MotorFailure::ConfigurationUnknown);
+     for(int i=0;i<voltra::MODE_PARAMETER_COUNT;++i)if(vlink::motorConfigurationField(mode,i))
+       (mode==1?s.weightSettingMs[i]:s.modeValueMs[i])=3010;
+     CHECK(commit(3011)==MotorFailure::None);
+     s.cableCm=2;CHECK(commit(3011)==MotorFailure::CableNotZero);
+     // Extended cable does not prevent a read-only query, but still blocks GO.
+     CHECK(vlink::tvMotorPreparationFailure(s,true,3011)==MotorFailure::None);
+     s.cableCm=0;s.session=13;CHECK(commit(3011)==MotorFailure::EndpointChanged);s.session=12;
+     s.mode=0;CHECK(commit(3011)==MotorFailure::EndpointChanged);s.mode=mode;
+     s.endpoint.valid=false;CHECK(commit(3011)==MotorFailure::EndpointChanged);endpoint(s,3000,paired);
+     if(paired){strcpy(s.endpoint.peer,"02:00:00:00:00:03");
+       CHECK(commit(3011)==MotorFailure::EndpointChanged);endpoint(s,3000,true);}
+     int* weightValues[]={&s.weightLbs,&s.chainsLbs,&s.inverseChainsEnabled,&s.eccentricLbs};
+     for(int i=0;i<voltra::MODE_PARAMETER_COUNT;++i)if(vlink::motorConfigurationField(mode,i)){
+       int& actual=mode==1?*weightValues[i]:s.modeValues[i];const int before=actual;
+       actual=before+1;CHECK(commit(3011)!=MotorFailure::None);actual=before;
+     }
+     s.cableMs=s.cableOffsetMs=1000;CHECK(commit(3011)==MotorFailure::CableUnknown);
+   }
+ }
+ // A failed poll during streaming must not manufacture a trainer disconnect.
+ // Use the same request classifier and failure budget as the BLE worker.
+ {
+   using vlink::trainerReadRequest;
+   for(auto read:{voltra::readSettingsFrame(),voltra::readRuntimeWireWeightFrame(),
+       voltra::readWeightUnitFrame(),voltra::readLengthUnitFrame(),voltra::readCableFrame(),
+       voltra::readTelemetryRateFrame(),voltra::readTelemetrySubscriptionFrame(),
+       voltra::readGuidedLoadStatusFrame(),voltra::readTwinFrame()})CHECK(trainerReadRequest(read));
+   uint8_t endpointBytes[13];CHECK(trainerReadRequest(voltra::endpointFrame(endpointBytes)));
+   for(int i=0;i<voltra::MODE_PARAMETER_COUNT;++i){
+     uint8_t bytes[17];voltra::Frame read;CHECK(voltra::readModeParameterFrame(i,bytes,read));
+     CHECK(trainerReadRequest(read));
+   }
+   for(auto control:{voltra::authFrame(),voltra::initFrame(0),voltra::initFrame(1),
+       voltra::telemetrySubscribeAllFrame(),voltra::setupFrame(),voltra::goFrame(),
+       voltra::stopFrame(),voltra::modeIdleFrame(),voltra::modeWeightTrainingFrame(),
+       voltra::cableFrame(true),voltra::cableFrame(false)})CHECK(!trainerReadRequest(control));
+   voltra::Frame weight;CHECK(voltra::weightFrame(5,weight));CHECK(!trainerReadRequest(weight));
+   uint8_t twinBytes[20];voltra::Frame twin;
+   CHECK(voltra::twinFrame(1,"02:00:00:00:00:02",1,twinBytes,twin));CHECK(!trainerReadRequest(twin));
+   CHECK(!trainerReadRequest({nullptr,0}));CHECK(!trainerReadRequest({endpointBytes,12}));
+   uint8_t malformed[13];std::memcpy(malformed,endpointBytes,sizeof(malformed));
+   malformed[10]=0x0f;voltra::sealTwinFrame(malformed,sizeof(malformed));
+   CHECK(!trainerReadRequest({malformed,sizeof(malformed)}));
+
+   vlink::PollWritePolicy policy;
+   CHECK(policy.mayAttempt(true,100));
+   CHECK(!policy.completed(true,false,true,100));CHECK_EQ(policy.failures,1u);
+   CHECK(!policy.mayAttempt(true,349));CHECK(policy.mayAttempt(true,350));
+   CHECK(policy.mayAttempt(false,101)); // Unload/control is never delayed by poll recovery.
+   CHECK_EQ(policy.failures,1u); // Skipped burst reads cannot spend the error budget.
+   CHECK(!policy.completed(true,true,true,350));CHECK_EQ(policy.failures,0u);
+   CHECK(policy.mayAttempt(true,351));
+
+   const uint32_t attempts[]={1000,1250,1750,2750,3750};
+   for(unsigned i=0;i<vlink::PollWritePolicy::FAILURE_LIMIT;++i){
+     CHECK(policy.mayAttempt(true,attempts[i]));
+     CHECK_EQ(policy.completed(true,false,true,attempts[i]),i==4);
+     CHECK_EQ(policy.failures,i+1);
+     CHECK(!policy.mayAttempt(true,attempts[i]+1));
+   }
+   policy={};CHECK(policy.completed(false,false,true,100));CHECK_EQ(policy.failures,0u);
+   // A true BLE loss immediately wins, even after a successful write callback.
+   policy={};CHECK(policy.completed(true,false,false,100));
+   policy={};CHECK(policy.completed(true,true,false,100));
+   policy={};CHECK(!policy.completed(true,false,true,UINT32_MAX-100));
+   CHECK(!policy.mayAttempt(true,148));CHECK(policy.mayAttempt(true,149));
+   policy={};CHECK(policy.mayAttempt(true,0));CHECK_EQ(policy.failures,0u); // New trainer session.
+
+   // Use no-response only for an explicitly supported, MTU-sized read poll.
+   // Controls, setup queries and unsupported/oversized polls keep ATT response.
+   const auto endpointRead=voltra::endpointFrame(endpointBytes);
+   CHECK(!vlink::trainerWriteResponse(endpointRead,true,true,23));
+   CHECK(vlink::trainerWriteResponse(endpointRead,true,false,23));
+   CHECK(vlink::trainerWriteResponse(endpointRead,true,true,15));
+   CHECK(vlink::trainerWriteResponse(endpointRead,true,true,2));
+   CHECK(!vlink::trainerWriteResponse(endpointRead,false,true,23));
+   CHECK(vlink::trainerReadHostQueued(endpointRead,true,23));
+   CHECK(!vlink::trainerReadHostQueued(endpointRead,false,23));
+   CHECK(!vlink::trainerReadHostQueued(endpointRead,true,15));
+   CHECK(!vlink::trainerReadHostQueued(endpointRead,true,2));
+   for(auto control:{voltra::authFrame(),voltra::setupFrame(),voltra::goFrame(),voltra::stopFrame(),weight,twin})
+     CHECK(!vlink::trainerReadHostQueued(control,true,247));
+   for(auto control:{voltra::authFrame(),voltra::setupFrame(),voltra::goFrame(),voltra::stopFrame(),weight,twin})
+     CHECK(vlink::trainerWriteResponse(control,true,true,247));
+   // Reproduce the captured ATT timeout: response waits 30 seconds despite
+   // notifications continuing. The production wrapper avoids that transaction
+   // for capable read polls, but never changes a control write into a poll.
+   for(bool noResponse:{false,true})for(bool control:{false,true}){
+     uint32_t clock=100;unsigned attempts=0;bool chosenResponse=false;policy={};
+     const auto frame=control?voltra::stopFrame():endpointRead;
+     const auto result=vlink::writeTrainerRequest(policy,frame,true,noResponse,247,[&]{return clock;},[]{return true;},
+       [&](bool response){++attempts;chosenResponse=response;if(response)clock+=30000;return !response;});
+     CHECK_EQ(attempts,1u);CHECK_EQ(chosenResponse,control||!noResponse);
+     CHECK_EQ(result.response,chosenResponse);CHECK_EQ(result.elapsedMs,chosenResponse?30000u:0u);
+     CHECK_EQ(result.accepted,!chosenResponse);CHECK_EQ(result.reconnect,control);
+   }
+   policy={};
+   // Deferring polls never refreshes measurements or grants stale controls.
+   vlink::DeviceState live;live.link=vlink::LinkState::Ready;live.statusMs=1000;
+   live.mode=1;live.fitnessMode=5;live.loaded=true;endpoint(live,1000);
+   live.motionMs=live.forceMs=1000;live.activeWeightTenths=60;live.cableVelocityMmPerSecond=100;
+   CHECK_EQ(vlink::movingWeightReading(live,1001).tenthsLb,60);
+   CHECK_EQ(vlink::movingWeightReading(live,1500).tenthsLb,-1);
+   CHECK(!vlink::fresh(live,4500));CHECK(!vlink::canLoad(live,4500));
+
+   // Fault injection drives the very same sender wrapper used by send().
+   uint32_t now=100;unsigned writes=0;bool connected=true,writeSucceeds=false,loseDuringWrite=false;
+   policy={};
+   const auto send=[&](voltra::Frame frame){
+     return vlink::writeTrainerRequest(policy,frame,true,true,247,[&]{return now;},[&]{return connected;},[&](bool){
+       ++writes;if(loseDuringWrite)connected=false;return writeSucceeds;
+     });
+   };
+   auto result=send(voltra::readSettingsFrame());
+   CHECK(result.attempted);CHECK(!result.accepted);CHECK(!result.reconnect);CHECK_EQ(writes,1u);
+   for(auto read:{voltra::readWeightUnitFrame(),voltra::readLengthUnitFrame(),voltra::readCableFrame()}){
+     result=send(read);CHECK(!result.attempted);CHECK(!result.accepted);CHECK(!result.reconnect);
+   }
+   CHECK_EQ(writes,1u);CHECK_EQ(policy.failures,1u);
+   now=350;writeSucceeds=true;result=send(voltra::readSettingsFrame());
+   CHECK(result.accepted);CHECK_EQ(writes,2u);CHECK_EQ(policy.failures,0u);
+   writeSucceeds=false;result=send(voltra::readSettingsFrame());CHECK(!result.reconnect);
+   const auto beforeControl=writes;result=send(voltra::stopFrame());
+   CHECK(result.attempted);CHECK(!result.accepted);CHECK(result.reconnect);CHECK_EQ(writes,beforeControl+1);
+   connected=false;const auto beforeDisconnected=writes;result=send(voltra::readSettingsFrame());
+   CHECK(!result.attempted);CHECK(result.reconnect);CHECK_EQ(writes,beforeDisconnected);
+   policy={};connected=true;writeSucceeds=true;loseDuringWrite=true;
+   result=send(voltra::readSettingsFrame());CHECK(result.attempted);CHECK(!result.accepted);CHECK(result.reconnect);
+ }
+ // Revoking a queued TV selection must not leave all subsequent controls busy.
+ vlink::DeviceState discarded;discarded.session=7;discarded.parameterSelectionPending=true;discarded.controlBusyUntil=5000;
+ vlink::discardTvCommand(discarded,6,true,false,true);
+ CHECK(discarded.parameterSelectionPending);CHECK_EQ(discarded.controlBusyUntil,5000u);
+ vlink::discardTvCommand(discarded,7,true,false,false);
+ CHECK(!discarded.parameterSelectionPending);CHECK_EQ(discarded.controlBusyUntil,5000u); // Following local command keeps busy ownership.
+ discarded.parameterSelectionPending=true;
+ vlink::discardTvCommand(discarded,7,true,false,true);
+ CHECK(!discarded.parameterSelectionPending);CHECK_EQ(discarded.controlBusyUntil,0u);
+ discarded.twinPending=true;discarded.twinSucceeded=true;discarded.controlBusyUntil=5000;
+ vlink::discardTvCommand(discarded,7,false,true,true);
+ CHECK(!discarded.twinPending);CHECK(!discarded.twinSucceeded);CHECK_EQ(discarded.twinCompleted,1u);CHECK_EQ(discarded.controlBusyUntil,0u);
+ // P0 admission matrix: both captured ready words work for every training
+ // mode, independently and in Twin. Unknown/loaded/armed/stale states stay shut.
+ for(bool paired:{false,true})for(int mode:{1,2,4,7})for(int ready:{0,4,0x0104}){
+   vlink::DeviceState state;state.link=vlink::LinkState::Ready;state.modeMs=state.statusMs=state.settingsMs=1000;
+   state.mode=mode;state.fitnessMode=ready;state.weightLbs=5;state.chainsLbs=state.eccentricLbs=0;
+   state.weightUnitRaw=1;endpoint(state,1000,paired);
+   state.modeValues[0]=15;state.modeValueMs[0]=1000;
+   state.modeValues[5]=0;state.modeValueMs[5]=1000;
+   state.modeValues[7]=100;state.modeValueMs[7]=1000;
+   CHECK(vlink::canSwitch(state,1001));CHECK(vlink::canLoad(state,1001));
+   if(mode==1)CHECK(vlink::canEdit(state,1001));
+   if(mode==2)CHECK(vlink::canEditBand(state,1001));
+   if(mode==4)CHECK(vlink::canEditDamper(state,1001));
+   if(mode==7)CHECK(vlink::canEditIsokinetic(state,1001,7));
+   // Firmware 2.0 unloaded report permits preparation only with a fresh mode.
+   state.fitnessMode=0;
+   CHECK(vlink::canLoad(state,1001));
+   state.modeMs=0;CHECK(!vlink::canLoad(state,1001));state.modeMs=1000;
+   if(mode==1)CHECK(vlink::canEdit(state,1001));
+   if(mode==2)CHECK(vlink::canEditBand(state,1001));
+   if(mode==4)CHECK(vlink::canEditDamper(state,1001));
+   if(mode==7)CHECK(vlink::canEditIsokinetic(state,1001,7));
+   for(int blocked:{-1,1,5,21,0x26,0x27,0x0204,0xffff}){
+     state.fitnessMode=blocked;CHECK(!vlink::canSwitch(state,1001));CHECK(!vlink::canLoad(state,1001));
+   }
+   state.fitnessMode=ready;state.loaded=true;CHECK(!vlink::canSwitch(state,1001));CHECK(!vlink::canLoad(state,1001));state.loaded=false;
+   state.armed=true;CHECK(!vlink::canSwitch(state,1001));CHECK(!vlink::canLoad(state,1001));state.armed=false;
+   state.twinPending=true;CHECK(!vlink::canSwitch(state,1001));CHECK(!vlink::canLoad(state,1001));state.twinPending=false;
+   state.cableActive=true;CHECK(!vlink::canSwitch(state,1001));CHECK(!vlink::canLoad(state,1001));state.cableActive=false;
+   state.controlBusyUntil=2000;CHECK(!vlink::canSwitch(state,1001));state.controlBusyUntil=0;
+   CHECK(!vlink::canSwitch(state,4500));CHECK(!vlink::canLoad(state,4500));
+   state.endpointMs=0;CHECK(!vlink::canLoad(state,1001));CHECK(!vlink::twinControlReady(state,1001));
+ }
  vlink::DeviceState discovery;strcpy(discovery.trainers[0].address,"10:20:30:40:50:60");
  CHECK(!vlink::trainerAvailable(discovery,0,500)); // Saved is not nearby.
  CHECK(vlink::canForgetTrainer(discovery,0,500)); // Offline devices can be reset.
@@ -33,7 +305,7 @@ int main(){
  discovery.link=vlink::LinkState::Scanning;CHECK(!vlink::trainerAvailable(discovery,0,20000));
  discovery.trainers[0].lastSeenMs=UINT32_MAX-100;
  CHECK(vlink::trainerAvailable(discovery,0,500));CHECK(!vlink::trainerAvailable(discovery,-1,500));CHECK(!vlink::trainerAvailable(discovery,2,500));
- vlink::DeviceState iso;iso.link=vlink::LinkState::Ready;iso.statusMs=1000;iso.mode=7;iso.fitnessMode=4;iso.twinConnection=0;iso.weightUnitRaw=1;endpoint(iso,1000);
+ vlink::DeviceState iso;iso.link=vlink::LinkState::Ready;iso.modeMs=iso.statusMs=1000;iso.mode=7;iso.fitnessMode=4;iso.twinConnection=0;iso.weightUnitRaw=1;endpoint(iso,1000);
  for(int i=7;i<=11;++i){iso.modeValueMs[i]=1000;iso.modeValues[i]=i==7?100:i<10?0:5;}
  CHECK(vlink::canLoad(iso,1001));CHECK(vlink::canEditIsokinetic(iso,1001,7));CHECK(vlink::canEditIsokinetic(iso,1001,9));CHECK(!vlink::canEditIsokinetic(iso,1001,10));
  iso.modeValues[8]=1;CHECK(vlink::canEditIsokinetic(iso,1001,10));CHECK(!vlink::canEditIsokinetic(iso,1001,9));
@@ -44,15 +316,24 @@ int main(){
  iso.twinConnection=2;iso.endpointMs=0;CHECK(!vlink::canLoad(iso,1001));endpoint(iso,1000,true);CHECK(vlink::canLoad(iso,1001));
 
  CHECK_EQ(damperFactor(4),17);CHECK_EQ(damperFactor(9),50);CHECK_EQ(damperFactor(-1),-1);CHECK_EQ(damperFactor(10),-1);CHECK(std::strcmp(damperRoman(4),"V")==0);
- vlink::DeviceState d;d.link=vlink::LinkState::Ready;d.statusMs=1000;d.mode=4;d.fitnessMode=4;d.modeValues[5]=4;d.modeValueMs[5]=1000;d.twinConnection=2;d.twinMs=1000;d.twinRoleMs=1000;d.twinLastRole=1;endpoint(d,1000,true);CHECK(vlink::canEditDamper(d,1001));d.mode=2;CHECK(!vlink::canEditDamper(d,1001));d.mode=4;d.loaded=true;CHECK(!vlink::canEditDamper(d,1001));d.loaded=false;d.modeValues[5]=10;CHECK(!vlink::canEditDamper(d,1001));
+ vlink::DeviceState d;d.link=vlink::LinkState::Ready;d.modeMs=d.statusMs=1000;d.mode=4;d.fitnessMode=4;d.modeValues[5]=4;d.modeValueMs[5]=1000;d.twinConnection=2;d.twinMs=1000;d.twinRoleMs=1000;d.twinLastRole=1;endpoint(d,1000,true);CHECK(vlink::canEditDamper(d,1001));d.mode=2;CHECK(!vlink::canEditDamper(d,1001));d.mode=4;d.loaded=true;CHECK(!vlink::canEditDamper(d,1001));d.loaded=false;d.modeValues[5]=10;CHECK(!vlink::canEditDamper(d,1001));
 
- vlink::DeviceState band;band.link=vlink::LinkState::Ready;band.statusMs=1000;band.mode=2;band.fitnessMode=4;band.modeValueMs[0]=1000;band.weightUnitRaw=1;endpoint(band,1000);
+ vlink::DeviceState band;band.link=vlink::LinkState::Ready;band.modeMs=band.statusMs=1000;band.mode=2;band.fitnessMode=4;band.modeValueMs[0]=1000;band.weightUnitRaw=1;endpoint(band,1000);
  CHECK(vlink::canEditBand(band,1001));band.mode=1;CHECK(!vlink::canEditBand(band,1001));band.mode=2;
  band.loaded=true;CHECK(!vlink::canEditBand(band,1001));band.loaded=false;band.cableActive=true;CHECK(!vlink::canEditBand(band,1001));band.cableActive=false;
  band.weightUnitRaw=-1;CHECK(!vlink::canEditBand(band,1001));band.weightUnitRaw=0;CHECK(!vlink::canEditBand(band,10000));
 
   d.modeValues[5]=4;d.twinMs=1000;CHECK(vlink::canLoad(d,1001));d.modeValueMs[5]=0;CHECK(!vlink::canLoad(d,1001));d.modeValueMs[5]=1000;d.armed=true;CHECK(!vlink::canLoad(d,1001));d.armed=false;d.endpointMs=0;CHECK(!vlink::canLoad(d,1001));
   CHECK(std::abs(kilograms(100)-45.359237)<0.000001);
+  // The captured minimum is 5 protocol lb but 2 kg per trainer, not 2.5 kg.
+  CHECK_EQ(displayBaseWeightKilograms(5,false),2.0);CHECK_EQ(displayBaseWeightKilograms(5,true),4.0);
+  CHECK_EQ(displayBaseWeightKilograms(6,false),2.5);CHECK_EQ(displayBaseWeightKilograms(6,true),5.0);
+  CHECK_EQ(displayWeightKilograms(5,false),2.5);CHECK_EQ(displayWeightKilograms(5,true),5.0); // Modifiers unchanged.
+  CHECK_EQ(baseWeightKgStep(5,-1,5,200),5);CHECK_EQ(baseWeightKgStep(5,1,5,200),6);
+  CHECK_EQ(baseWeightKgStep(6,-1,5,200),5);CHECK_EQ(baseWeightKgStep(6,1,5,200),7);
+  Editor minimumWeight;minimumWeight.observe(5);minimumWeight.turn(1,true,false,100,5,200,true);
+  CHECK_EQ(minimumWeight.target,6);CHECK(minimumWeight.pending);
+  minimumWeight.cancel();minimumWeight.turn(-1,true,false,200,5,200,true);CHECK(!minimumWeight.pending);
   for(int v=5;v<=200;++v){CHECK(kgStep(v,1,5,200)>=v);CHECK(kgStep(v,-1,5,200)<=v);CHECK(kgStep(v,1,5,200)<=200);CHECK(kgStep(v,-1,5,200)>=5);}
   CHECK_EQ(displayKilograms(93),42.5);
   CHECK_EQ(displayKilograms(kgStep(93,1,5,200)),43.0);
@@ -86,7 +367,7 @@ int main(){
   s.fitnessMode=4;s.mode=1;s.loaded=false;s.armed=false;s.statusMs=100;
   CHECK(vlink::canSwitch(s,100));s.controlBusyUntil=500;CHECK(!vlink::canSwitch(s,100));CHECK(vlink::canSwitch(s,501));s.controlBusyUntil=0;
   s.fitnessMode=5;CHECK(!vlink::canSwitch(s,100));s.fitnessMode=0x27;CHECK(!vlink::canSwitch(s,100));s.fitnessMode=4;CHECK(!vlink::canSwitch(s,4000));
-  CHECK(!vlink::canLoad(s,100));s.weightLbs=20;s.chainsLbs=0;s.eccentricLbs=0;s.settingsMs=100;CHECK(vlink::canLoad(s,100));CHECK(!vlink::canLoad(s,4000));
+  CHECK(!vlink::canLoad(s,100));s.weightLbs=20;s.chainsLbs=0;s.eccentricLbs=0;s.modeMs=s.settingsMs=100;CHECK(vlink::canLoad(s,100));CHECK(!vlink::canLoad(s,4000));
   s.fitnessMode=5;s.loaded=true;
   CHECK(vlink::canEditParameter(s,100,vlink::Parameter::Weight));
   CHECK(!vlink::canEditParameter(s,100,vlink::Parameter::Chains));CHECK(!vlink::canLoad(s,100));
@@ -137,7 +418,7 @@ int main(){
   reading.fitnessMode=4;reading.loaded=false;
   CHECK_EQ(vlink::activeWeightReading(reading,1601).tenthsLb,0); // residual target/force ignored unloaded
   CHECK(vlink::activeWeightReading(reading,1601).source==vlink::ActiveWeightSource::Unloaded);
-  for(int fitness:{-1,0,0x26,0x27,8}){
+  for(int fitness:{-1,2,0x26,0x27,8}){
     reading.fitnessMode=fitness;CHECK_EQ(vlink::activeWeightReading(reading,1601).tenthsLb,-1);
   }
   reading.fitnessMode=5;reading.loaded=false;CHECK_EQ(vlink::activeWeightReading(reading,1601).tenthsLb,-1);
@@ -269,7 +550,7 @@ int main(){
   discovered.nearby[2].lastSeenMs=1;CHECK_EQ(vlink::nearbySlot(discovered,"extra",10002),2);
   discovered.discoveryPausedForTv=true;CHECK(!vlink::trainerNearby(discovered,0,1000));
   CHECK(vlink::trainerAvailable(discovered,0,1000)); // saved reconnect is not Nearby
-  discovered.selected=0;discovered.link=vlink::LinkState::Ready;discovered.statusMs=1000;
+  discovered.selected=0;discovered.link=vlink::LinkState::Ready;discovered.modeMs=discovered.statusMs=1000;
   CHECK(vlink::trainerNearby(discovered,0,1100));CHECK(!vlink::trainerNearby(discovered,0,5000));
   // Shared chain weight is attributed only to the direction selected by the trainer.
   vlink::DeviceState chains;chains.chainsLbs=2;chains.inverseChainsEnabled=1;
