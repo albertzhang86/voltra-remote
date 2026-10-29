@@ -1,4 +1,5 @@
 #include "minitest.h"
+#include "host/Arduino.h" // Shared platform shims, including strlcpy on Ubuntu.
 #include "link/voltra_link.h"
 #include <atomic>
 #include <vector>
